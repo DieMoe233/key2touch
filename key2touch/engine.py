@@ -94,7 +94,8 @@ class Engine:
         self.mice = {}  # fd -> InputDevice; grabbed only while camera mode is on
         self.mice_grabbed = set()
         self.want_mouse_grab = False
-        self.cursor_held = False  # the look point's cursor key (default Alt) is down
+        self.cursor_free = False  # mouse cursor shown instead of camera mode
+        self.cursor_tap = False  # cursor key is down and nothing else was pressed since
         self.paths = set()
         self.want_grab = False
         self.grabbed_fds = set()
@@ -248,7 +249,7 @@ class Engine:
         """Camera mode = mapping active + a look point + cursor key not held.
         While on, mice are grabbed: motion drives the camera, buttons can be
         bound like keys, the cursor stays put."""
-        want = bool(self.active and self.mapper.look and not self.cursor_held)
+        want = bool(self.active and self.mapper.look and not self.cursor_free)
         if want == self.want_mouse_grab:
             return
         self.want_mouse_grab = want
@@ -290,6 +291,7 @@ class Engine:
                 elif ev.code == e.REL_Y:
                     dy += ev.value
             elif ev.type == e.EV_KEY and ev.value != 2:
+                self.cursor_tap = False
                 if ev.value == 1:
                     self.dev_down.setdefault(dev.fd, set()).add(ev.code)
                 else:
@@ -312,6 +314,7 @@ class Engine:
             self.active = active
             if not active:
                 self.mapper.release_all()
+            self.cursor_free = False  # (re)entering the game starts in camera mode
         self.set_grab(self.active and self.profile.get("grab", True))
         self.update_look()
         self.emit_state()
@@ -365,12 +368,19 @@ class Engine:
                 if val == 0:
                     self.hotkey_down.discard(code)
                 continue
-            if code == self.mapper.cursor_key:
-                # Held: show the mouse cursor (leave camera mode) — like Alt in PC games.
-                self.cursor_held = val != 0
-                self.update_look()
-                if self.active:
-                    continue
+            if code == self.mapper.cursor_key and val != 2:
+                # Not swallowed: the key (default Ctrl) also serves in combos.
+                if self.mapper.cursor_mode == "hold":
+                    self.cursor_free = val == 1
+                    self.update_look()
+                elif val == 1:
+                    self.cursor_tap = True
+                elif self.cursor_tap:  # pressed and released on its own: toggle
+                    self.cursor_tap = False
+                    self.cursor_free = not self.cursor_free
+                    self.update_look()
+            elif val == 1:
+                self.cursor_tap = False  # Ctrl+Q etc. is a combo, not a tap
             action = self.match_hotkey(code) if val == 1 else None
             if action:
                 self.hotkey_down.add(code)
@@ -378,6 +388,7 @@ class Engine:
                     self.emit(ev="hotkey", action="edit")  # the GUI opens / closes the editor
                     continue
                 self.enabled = not self.enabled
+                self.emit(ev="toggled", enabled=self.enabled)  # the GUI notifies the user
                 if pass_dirty:
                     self.passthru.syn()
                     pass_dirty = False

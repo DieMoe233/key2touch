@@ -816,6 +816,13 @@ class Key2Touch(Adw.Application):
         if ev == "key":
             if self.hud:
                 self.hud.key_event(msg["code"], msg.get("idx"), msg["down"])
+        elif ev == "toggled":
+            # Toggled by the hotkey, maybe by accident in-game: say so.
+            n = Gio.Notification.new("key2touch：映射已" + ("开启" if msg["enabled"] else "关闭"))
+            hk = self.hotkey_label()
+            if hk:
+                n.set_body(f"按 {hk} 可以再次{'关闭' if msg['enabled'] else '开启'}")
+            self.send_notification("toggled", n)
         elif ev == "hotkey" and msg.get("action") == "edit":
             if self.editor:
                 self.editor.finish(True)  # second press: save and leave the editor

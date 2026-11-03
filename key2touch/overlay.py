@@ -365,13 +365,28 @@ class Overlay(Gtk.Window):
 
     def _look_panel(self, p):
         self.panel.append(self._caption("游戏里移动鼠标即拖动视角；松开一会儿手指会抬起"))
-        self.panel.append(self._caption("按住此键显示鼠标（点界面用）"))
+        self.panel.append(self._caption("显示鼠标（点界面用）的按键"))
         binding = self.binding is not None and self.binding[0] == self.sel
         b = Gtk.Button(label="按下按键…" if binding else key_label(p.get("cursor_key")))
         if binding:
             b.add_css_class("suggested-action")
         b.connect("clicked", lambda *_: self.start_binding(self.sel, "cursor"))
         self.panel.append(b)
+        mode = Gtk.Box(homogeneous=True)
+        mode.add_css_class("linked")
+        tg = Gtk.ToggleButton(label="单击切换", active=p.get("cursor_mode", "toggle") == "toggle")
+        hd = Gtk.ToggleButton(label="按住显示", active=p.get("cursor_mode") == "hold", group=tg)
+
+        def set_mode(btn, m):
+            if btn.get_active():
+                p["cursor_mode"] = m
+                self.area.queue_draw()
+
+        tg.connect("toggled", set_mode, "toggle")
+        hd.connect("toggled", set_mode, "hold")
+        mode.append(tg)
+        mode.append(hd)
+        self.panel.append(mode)
         self.panel.append(self._caption("灵敏度"))
         sens = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0.2, 5.0, 0.05)
         sens.set_value(p.get("sens", 1.0))
@@ -806,7 +821,8 @@ class Overlay(Gtk.Window):
             cr.line_to(x + dx * 22, y + dy * 22)
         cr.stroke()
         self._label(cr, x, y + 40, "视角", 16, (1, 1, 1, max(a, 0.35)))
-        hint = "按下按键…" if binding else f"按住 {key_label(p.get('cursor_key'))} 显示鼠标"
+        verb = "按住" if p.get("cursor_mode") == "hold" else "单击"
+        hint = "按下按键…" if binding else f"{verb} {key_label(p.get('cursor_key'))} 显示鼠标"
         self._label(cr, x, y + 62, hint, 12, (1, 0.82, 0.35, 1) if binding else (1, 1, 1, max(a * 0.8, 0.3)))
 
     def _draw_help(self, cr, w, h):

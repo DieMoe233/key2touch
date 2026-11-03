@@ -76,7 +76,9 @@ the camera area is in use, i.e. when the profile has a `look` point).
 `point add look X Y` adds a camera area: while mapping is active the mouse
 is captured and its motion drags a virtual finger from (X, Y); `--sens`
 scales it (default 1.0), `--size` is how far the finger may travel before
-it is re-centred. Holding the cursor key (default `lalt`) frees the mouse.
+it is re-centred. Tapping the cursor key on its own (default `lctrl`)
+toggles between camera and a free mouse cursor (`--cursor-mode hold` makes
+it hold-to-show instead); ctrl+<key> combos still work.
 Put it on an empty part of the screen, away from buttons.
 
 ## Typical session
@@ -252,7 +254,8 @@ def describe_point(i, p):
     if p["type"] == "look":
         return {"index": i, "type": "look", "x": round(p["x"], 4), "y": round(p["y"], 4),
                 "size": round(p.get("r", 0.22), 4), "sens": p.get("sens", 1.0),
-                "cursor_key": fmt_key(p["cursor_key"]) if p.get("cursor_key") else None}
+                "cursor_key": fmt_key(p["cursor_key"]) if p.get("cursor_key") else None,
+                "cursor_mode": p.get("cursor_mode", "toggle")}
     if p["type"] == "joystick":
         keys = {d: (fmt_key(p["keys"][d]) if p["keys"].get(d) else None) for d in JOY_DIRS}
         return {"index": i, "type": "joystick", "x": round(p["x"], 4), "y": round(p["y"], 4),
@@ -391,7 +394,7 @@ def cmd_profile(args, out):
 def _point_line(d):
     if d["type"] == "look":
         return (f"  [{d['index']}] 视角  ({d['x']:.3f}, {d['y']:.3f})  size {d['size']}  "
-                f"sens {d['sens']}  按住 {d['cursor_key']} 显示鼠标")
+                f"sens {d['sens']}  {'按住' if d['cursor_mode'] == 'hold' else '单击'} {d['cursor_key']} 显示鼠标")
     if d["type"] == "joystick":
         keys = "/".join(d["keys"][k] or "?" for k in JOY_DIRS)
         return f"  [{d['index']}] 摇杆 {keys}  ({d['x']:.3f}, {d['y']:.3f})  size {d['size']}"
@@ -463,6 +466,8 @@ def cmd_point(args, out):
                 pt["sens"] = args.sens
             if args.cursor_key:
                 pt["cursor_key"] = parse_key(args.cursor_key)[0]
+            if args.cursor_mode:
+                pt["cursor_mode"] = args.cursor_mode
         else:
             keys = [k.strip() for k in (args.keys or "w,a,s,d").split(",")]
             if len(keys) != 4:
@@ -506,6 +511,10 @@ def cmd_point(args, out):
                 if q["type"] != "look":
                     raise CliError("--cursor-key 只适用于视角区域", EXIT_USAGE)
                 q["cursor_key"] = parse_key(args.cursor_key)[0]
+            if args.cursor_mode is not None:
+                if q["type"] != "look":
+                    raise CliError("--cursor-mode 只适用于视角区域", EXIT_USAGE)
+                q["cursor_mode"] = args.cursor_mode
             if args.key is not None:
                 if q["type"] != "tap":
                     raise CliError("摇杆请用 --keys 上,左,下,右", EXIT_USAGE)
@@ -669,7 +678,7 @@ def check_profile(name, p, b):
     if any(q["type"] == "look" for q in pts) and not (p.get("only_focused") and b.supports_focus):
         add("warning", "look_without_focus",
             "有视角区域时鼠标会被占用：建议开启仅聚焦指定窗口时生效（set only-focused true），"
-            "否则切到别的窗口鼠标仍被占用，只能按住显示鼠标的键或用开关热键")
+            "否则切到别的窗口鼠标仍被占用，只能按显示鼠标的键或用开关热键")
     if not pts:
         add("warning", "no_points", "没有按键点")
     for i, q in enumerate(pts):
@@ -779,7 +788,8 @@ def build_parser():
     a.add_argument("y")
     a.add_argument("--size", type=float, help="活动范围半径，占显示器高度的比例（默认 0.22）")
     a.add_argument("--sens", type=float, help="灵敏度（默认 1.0）")
-    a.add_argument("--cursor-key", help="按住显示鼠标的键（默认 lalt）")
+    a.add_argument("--cursor-key", help="显示鼠标的键（默认 lctrl）")
+    a.add_argument("--cursor-mode", choices=["toggle", "hold"], help="toggle：单击切换（默认）；hold：按住显示")
     a = add.add_parser("stick", help="摇杆：X Y", parents=[common, target])
     a.add_argument("x")
     a.add_argument("y")
@@ -794,7 +804,8 @@ def build_parser():
     p.add_argument("--key", help="点击类按键点的按键")
     p.add_argument("--keys", help="摇杆的 上,左,下,右")
     p.add_argument("--sens", type=float, help="视角灵敏度")
-    p.add_argument("--cursor-key", help="视角：按住显示鼠标的键")
+    p.add_argument("--cursor-key", help="视角：显示鼠标的键")
+    p.add_argument("--cursor-mode", choices=["toggle", "hold"], help="视角：单击切换 / 按住显示")
     p.add_argument("--replace", action="store_true", help="按键已被别的按键点使用时，改绑到这里")
     p = pt.add_parser("rm", help="删除按键点", parents=[common, target])
     p.add_argument("index", type=int, nargs="+")

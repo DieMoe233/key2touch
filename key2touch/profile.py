@@ -53,9 +53,11 @@ def new_look(x, y, r=0.22):
 
     r: how far the finger may wander (fraction of output height) before it
     is lifted and put back at the centre; sens: touch distance per mouse
-    count (1.0 = 0.0005 of the output height); cursor_key: held to get the
-    mouse cursor back."""
-    return {"type": "look", "x": x, "y": y, "r": r, "sens": 1.0, "cursor_key": "KEY_LEFTALT"}
+    count (1.0 = 0.0005 of the output height); cursor_key: brings the mouse
+    cursor back — tapped on its own to toggle (cursor_mode "toggle"), or
+    held (cursor_mode "hold")."""
+    return {"type": "look", "x": x, "y": y, "r": r, "sens": 1.0,
+            "cursor_key": "KEY_LEFTCTRL", "cursor_mode": "toggle"}
 
 
 def normalize(p):

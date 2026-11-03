@@ -138,6 +138,7 @@ class Mapper:
         self.bindings = {}  # keycode -> [(mods frozenset, control index)]
         self.look = None
         self.cursor_key = None
+        self.cursor_mode = "toggle"
         for i, pt in enumerate(profile.get("points", [])):
             if pt.get("type") == "look":
                 c = Look(touch, pt, aspect)
@@ -145,6 +146,7 @@ class Mapper:
                 if self.look is None:  # one camera area per profile
                     self.look = c
                     self.cursor_key = keycode(pt.get("cursor_key"))
+                    self.cursor_mode = pt.get("cursor_mode", "toggle")
             elif pt.get("type") == "joystick":
                 c = Joystick(touch, pt, aspect)
                 binds = [(code, frozenset()) for code in c.dirs]
