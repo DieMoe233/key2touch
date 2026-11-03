@@ -73,6 +73,7 @@ class SwayFocus:
         _send(self.sock, SUBSCRIBE, json.dumps(["window", "workspace"]))
         _recv(self.sock)  # subscribe reply
         self.initial_app = focused_app()
+        self.window_id = None
 
     def fileno(self):
         return self.sock.fileno()
@@ -81,7 +82,10 @@ class SwayFocus:
         out = []
         t, ev = _recv(self.sock)
         if t == EVENT_WINDOW and ev.get("change") in ("focus", "close", "title"):
-            out.append(focused_app() if ev["change"] == "close" else _app_id(ev.get("container") or {}))
+            con = ev.get("container") or {}
+            if ev["change"] != "close":
+                self.window_id = con.get("id")
+            out.append(focused_app() if ev["change"] == "close" else _app_id(con))
         elif t == EVENT_WORKSPACE and ev.get("change") == "focus":
             out.append(focused_app())  # may be an empty workspace
         return out

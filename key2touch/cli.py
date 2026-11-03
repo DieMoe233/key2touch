@@ -34,7 +34,7 @@ MOUSE_ALIASES = {"LMB": "BTN_LEFT", "MOUSE1": "BTN_LEFT", "MOUSE_LEFT": "BTN_LEF
                  "MOUSE4": "BTN_SIDE", "BTN_SIDE": "BTN_SIDE", "MOUSE5": "BTN_EXTRA", "BTN_EXTRA": "BTN_EXTRA"}
 _MOUSE_SPEC = {"BTN_LEFT": "lmb", "BTN_RIGHT": "rmb", "BTN_MIDDLE": "mmb", "BTN_SIDE": "mouse4", "BTN_EXTRA": "mouse5"}
 
-COMMANDS = {"on", "off", "toggle", "status", "edit", "show", "quit", "profiles", "profile",
+COMMANDS = {"on", "off", "toggle", "status", "edit", "show", "quit", "reset-touch", "profiles", "profile",
             "point", "set", "window", "outputs", "windows", "check", "agent-help"}
 
 AGENT_HELP = """\
@@ -99,6 +99,7 @@ Put it on an empty part of the screen, away from buttons.
 
 ## Commands
     on | off | toggle | status          control the running app (exit 3 if not running)
+    reset-touch                         recreate the virtual touchscreen if the game stops reacting
     show | edit | quit                  show window / open layout editor / quit
     profiles                            list profiles
     profile show|use|new|rm|rename|export|import
@@ -759,7 +760,8 @@ def build_parser():
     sp = ap.add_subparsers(dest="cmd", metavar="命令")
     for name, help_ in (("on", "开启映射"), ("off", "关闭映射"), ("toggle", "开关映射"),
                         ("status", "查看状态"), ("show", "显示主窗口"), ("edit", "打开布局编辑器"),
-                        ("quit", "退出正在运行的 key2touch")):
+                        ("quit", "退出正在运行的 key2touch"),
+                        ("reset-touch", "重新创建虚拟触摸屏（映射生效但游戏没反应时）")):
         sp.add_parser(name, help=help_, parents=[common])
     sp.add_parser("profiles", help="列出所有配置", parents=[common])
     sp.add_parser("agent-help", help="打印给 AI agent 的使用说明", parents=[common])
@@ -842,7 +844,7 @@ def main(argv):
         if args.cmd == "agent-help":
             print(AGENT_HELP, end="")
             return 0
-        if args.cmd in ("on", "off", "toggle", "status", "show", "edit", "quit"):
+        if args.cmd in ("on", "off", "toggle", "status", "show", "edit", "quit", "reset-touch"):
             return cmd_control(args, out)
         if args.cmd == "profiles":
             return cmd_profiles(args, out)

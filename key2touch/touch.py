@@ -23,9 +23,13 @@ class TouchScreen:
                 (e.ABS_MT_POSITION_Y, absi),
             ],
         }
+        self.caps = caps
+        self._create()
+
+    def _create(self):
         # INPUT_PROP_DIRECT makes libinput treat it as a touchscreen (wl_touch)
         # instead of an absolute pointer.
-        self.ui = UInput(caps, name=DEVICE_NAME, vendor=VENDOR, product=PRODUCT,
+        self.ui = UInput(self.caps, name=DEVICE_NAME, vendor=VENDOR, product=PRODUCT,
                          input_props=[e.INPUT_PROP_DIRECT])
         self.free = list(range(SLOTS))
         self.active = {}  # slot -> True
@@ -82,6 +86,15 @@ class TouchScreen:
     def release_all(self):
         for s in list(self.active):
             self.up(s)
+
+    def recreate(self):
+        """Replace the uinput device with a fresh one (same object, so every
+        control keeps its reference). Removing and re-adding the device makes
+        the compositor drop whatever touch state it kept for it — e.g. after
+        the game window it was touching got destroyed mid-touch."""
+        self.release_all()
+        self.ui.close()
+        self._create()
 
     def close(self):
         self.release_all()

@@ -260,6 +260,7 @@ class Key2Touch(Adw.Application):
             {"label": "启用映射", "action": lambda: self.enable_row.set_active(not self.enable_row.get_active()),
              "checked": lambda: self.enable_row.get_active()},
             {"label": "编辑布局", "action": self.on_edit},
+            {"label": "重置触摸（按键没反应时）", "action": lambda: self.engine.send(cmd="reset-touch")},
             None,
             {"label": "退出", "action": self.quit},
         ], on_activate=self.toggle_window)
@@ -410,6 +411,7 @@ class Key2Touch(Adw.Application):
         # Actions the CLI drives over D-Bus (org.gtk.Actions), see __main__.py.
         for name, cb in (("show", lambda *_: self.show_window()),
                          ("reload", lambda *_: self._reload_from_disk()),
+                         ("reset-touch", lambda *_: self.engine.send(cmd="reset-touch")),
                          ("edit", lambda *_: self.on_edit()),
                          ("quit", lambda *_: self.quit())):
             a = Gio.SimpleAction.new(name, None)

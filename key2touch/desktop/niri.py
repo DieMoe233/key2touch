@@ -131,6 +131,7 @@ class NiriFocus:
         self.buf = b""
         self.windows = {}  # id -> app_id
         self.focus_id = None
+        self.window_id = None
 
     def fileno(self):
         return self.sock.fileno()
@@ -166,6 +167,7 @@ class NiriFocus:
             elif "WindowFocusChanged" in ev:
                 self.focus_id = ev["WindowFocusChanged"]["id"]
                 changed = True
+        self.window_id = self.focus_id
         return [self.windows.get(self.focus_id)] if changed else []
 
 

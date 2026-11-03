@@ -48,6 +48,7 @@ class HyprlandFocus:
         self.sock.settimeout(IPC_TIMEOUT)
         self.sock.connect(_sock_path(".socket2.sock"))
         self.buf = b""
+        self.window_id = None
         aw = request_json("activewindow") or {}
         self.initial_app = aw.get("class") or None
 
@@ -65,6 +66,8 @@ class HyprlandFocus:
             ev, _, arg = line.decode(errors="replace").partition(">>")
             if ev == "activewindow":
                 out.append(arg.split(",", 1)[0] or None)
+            elif ev == "activewindowv2":
+                self.window_id = arg or None
         return out
 
 

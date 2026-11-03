@@ -184,6 +184,7 @@ class Engine:
         self.backend = desktop.detect()
         self.focus_src = None  # None: this desktop can't report focus
         self.focus_app = None
+        self.game_wid = None  # last game window touched; a new one resets the touchscreen
         self.stdin_buf = b""
         self.active = False
         self.priority = "normal"
@@ -552,9 +553,23 @@ class Engine:
             self.focus_src = None
             self.update_active()
             return
+        wid = getattr(self.focus_src, "window_id", None)
+        rules = self.profile.get("windows") or []
+        if wid is not None and window_matches(changes[-1] if changes else self.focus_app, rules):
+            if self.game_wid is not None and wid != self.game_wid:
+                # A different game window (e.g. the game was restarted): the
+                # compositor may still hold touch state for the dead one, which
+                # would swallow every new touch. A fresh device clears it.
+                self.reset_touch(f"new game window {wid}")
+            self.game_wid = wid
         if changes and changes[-1] != self.focus_app:
             self.focus_app = changes[-1]
             self.update_active()
+
+    def reset_touch(self, why):
+        self.mapper.release_all()
+        self.touch.recreate()
+        log(f"touchscreen recreated: {why}")
 
     def on_stdin(self):
         data = os.read(0, 65536)
@@ -567,6 +582,8 @@ class Engine:
             cmd = msg.get("cmd")
             if cmd == "profile":
                 self.set_profile(msg["profile"], msg.get("aspect", 16 / 9))
+            elif cmd == "reset-touch":
+                self.reset_touch("requested")
             elif cmd == "hotkeys":
                 self.hotkeys_on = bool(msg["on"])
             elif cmd == "enable":
