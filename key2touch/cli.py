@@ -58,7 +58,7 @@ x = pixel_x / image_width, y = pixel_y / image_height. This works at any
 scale factor. If the game is not fullscreen, its buttons move whenever the
 window moves, so prefer fullscreen (Waydroid: F11).
 `size` is a radius as a fraction of the display height (tap default 0.025,
-joystick default 0.12).
+joystick default 0.12, look default 0.22 and minimum 0.15).
 
 ## Verify
 `key2touch check -p NAME --json` reports errors (exit 1) and warnings:
@@ -391,6 +391,11 @@ def cmd_profile(args, out):
     raise CliError("缺少子命令", EXIT_USAGE)
 
 
+def _check_look_size(size):
+    if size is not None and size < prof.LOOK_MIN_R:
+        raise CliError(f"视角区域的 size 最小为 {prof.LOOK_MIN_R}（太小转视角会一顿一顿）", EXIT_USAGE)
+
+
 def _point_line(d):
     if d["type"] == "look":
         return (f"  [{d['index']}] 视角  ({d['x']:.3f}, {d['y']:.3f})  size {d['size']}  "
@@ -461,6 +466,7 @@ def cmd_point(args, out):
             pt = prof.new_tap(x, y, key, r=args.size or prof.TAP_R)
             pt["mods"] = mods
         elif args.kind == "look":
+            _check_look_size(args.size)
             pt = prof.new_look(x, y, r=args.size or 0.22)
             if args.sens is not None:
                 pt["sens"] = args.sens
@@ -502,6 +508,8 @@ def cmd_point(args, out):
             if args.y is not None:
                 q["y"] = parse_coord(args.y)
             if args.size is not None:
+                if q["type"] == "look":
+                    _check_look_size(args.size)
                 q["r"] = args.size
             if args.sens is not None:
                 if q["type"] != "look":
@@ -690,11 +698,7 @@ def check_profile(name, p, b):
         if q["x"] - rx < 0 or q["x"] + rx > 1 or q["y"] - r < 0 or q["y"] + r > 1:
             add("warning", "partly_offscreen", f"第 {i} 个按键点的范围超出了屏幕边缘", point=i)
         if q["type"] == "look":
-            if r < 0.1:
-                add("warning", "look_too_small",
-                    f"第 {i} 个视角区域太小（size {r:.2f}）：手指很快到边缘、频繁重新按下，转视角会一顿一顿；建议 ≥ 0.15",
-                    point=i)
-            continue
+            continue  # its size is clamped to LOOK_MIN_R by the engine
         if q["type"] == "tap" and not q.get("key"):
             add("warning", "unbound", f"第 {i} 个按键点没有绑定按键", point=i)
         if q["type"] == "joystick" and not all(q["keys"].get(d) for d in JOY_DIRS):

@@ -3,7 +3,7 @@
 import math
 from evdev import ecodes as e
 
-from .profile import JOY_DIRS
+from .profile import JOY_DIRS, LOOK_MIN_R
 
 # Modifier keys, grouped so either side matches ("CTRL" = left or right Ctrl).
 MOD_GROUP = {
@@ -105,7 +105,7 @@ class Look:
 
     def __init__(self, touch, pt, aspect):
         self.touch, self.cx, self.cy = touch, pt["x"], pt["y"]
-        self.r = pt.get("r", 0.22)
+        self.r = max(pt.get("r", 0.22), LOOK_MIN_R)  # older profiles may hold smaller values
         self.k = pt.get("sens", 1.0) * LOOK_SCALE
         self.aspect = aspect
         self.slot = None

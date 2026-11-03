@@ -48,6 +48,10 @@ def new_joystick(x, y, r=0.12):
     }
 
 
+# Below this the camera finger reaches the edge so often that turning stutters.
+LOOK_MIN_R = 0.15
+
+
 def new_look(x, y, r=0.22):
     """Camera area: mouse motion drags a virtual finger around (x, y).
 

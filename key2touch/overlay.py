@@ -17,14 +17,14 @@ from gi.repository import Gdk, GLib, Gtk, Gtk4LayerShell as LS  # noqa: E402
 from evdev import ecodes as e  # noqa: E402
 
 from .mapper import MOD_GROUP, MOD_ORDER  # noqa: E402
-from .profile import JOY_DIRS, TAP_R, new_joystick, new_look, new_tap  # noqa: E402
+from .profile import JOY_DIRS, LOOK_MIN_R, TAP_R, new_joystick, new_look, new_tap  # noqa: E402
 
 ARROWS = {"KEY_UP": "↑", "KEY_DOWN": "↓", "KEY_LEFT": "←", "KEY_RIGHT": "→", "KEY_SPACE": "Space"}
 DIR_ANGLE = {"up": -90, "right": 0, "down": 90, "left": 180}
 DIR_ARROW = {"up": "↑", "left": "←", "down": "↓", "right": "→"}
 MOD_NAME_GROUP = {e.KEY[c]: g for c, g in MOD_GROUP.items()}
 MOD_LABEL = {"CTRL": "Ctrl", "ALT": "Alt", "SHIFT": "Shift", "META": "Super"}
-SIZE_RANGE = {"tap": (0.008, 0.1), "joystick": (0.03, 0.45), "look": (0.1, 0.45)}  # a small camera area restarts its stroke very often
+SIZE_RANGE = {"tap": (0.008, 0.1), "joystick": (0.03, 0.45), "look": (LOOK_MIN_R, 0.45)}
 MOUSE_LABELS = {"BTN_LEFT": "左键", "BTN_RIGHT": "右键", "BTN_MIDDLE": "中键",
                 "BTN_SIDE": "侧键1", "BTN_EXTRA": "侧键2"}
 # GDK button number -> evdev code, for binding mouse buttons by clicking.
@@ -803,7 +803,7 @@ class Overlay(Gtk.Window):
             self._hint(cr, x, y - r - 24, f"按下「{names[bind_dir]}」方向的键（Esc 停止）")
 
     def _draw_look(self, cr, p, w, h, a, selected, binding):
-        x, y, r = p["x"] * w, p["y"] * h, p["r"] * h
+        x, y, r = p["x"] * w, p["y"] * h, max(p["r"], LOOK_MIN_R) * h
         cr.new_path()
         cr.set_dash([10, 8])
         cr.arc(x, y, r, 0, 2 * math.pi)

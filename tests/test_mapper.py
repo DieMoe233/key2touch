@@ -165,10 +165,11 @@ class LookTests(unittest.TestCase):
     def setUp(self):
         from key2touch.profile import new_look
         self.t = FakeTouch()
-        pt = new_look(0.6, 0.4, r=0.1)
+        pt = new_look(0.6, 0.4, r=0.1)  # below LOOK_MIN_R: the mapper clamps it
         pt["sens"] = 2.0  # 0.001 of the height per count
         self.m = Mapper(self.t, {"points": [pt]}, aspect=2.0)
         self.look = self.m.look
+        self.look.r = 0.1  # exercise the geometry with a round number
 
     def test_drag_from_centre(self):
         self.look.motion(20, -10, now=1.0)
@@ -203,6 +204,10 @@ class LookTests(unittest.TestCase):
                 travel += entry[2] - prev
                 prev = entry[2]
         self.assertAlmostEqual(travel * 2, 200 * 10 * 0.001, places=2)  # back to height units
+
+    def test_min_size(self):
+        from key2touch.profile import LOOK_MIN_R, new_look
+        self.assertEqual(Mapper(FakeTouch(), {"points": [new_look(0.5, 0.5, r=0.05)]}).look.r, LOOK_MIN_R)
 
     def test_idle_lift(self):
         self.look.motion(5, 5, now=1.0)
