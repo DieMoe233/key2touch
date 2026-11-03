@@ -6,7 +6,7 @@ import socket
 import struct
 
 from ..touch import DEVICE_NAME, PRODUCT, VENDOR
-from . import Backend
+from . import IPC_TIMEOUT, Backend
 
 MAGIC = b"i3-ipc"
 HEADER = struct.Struct("<6sII")
@@ -21,6 +21,7 @@ def _connect():
     if not path:
         raise FileNotFoundError("SWAYSOCK 未设置")
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(IPC_TIMEOUT)  # also bounds a partial event read on the subscription
     s.connect(path)
     return s
 
@@ -123,7 +124,7 @@ class SwayBackend(Backend):
         except (OSError, EOFError, ValueError) as ex:
             self.sync_error = str(ex)
 
-    def touch_status(self, output, n_outputs):
-        if self.sync_error:
-            return False, f"swaymsg 设置失败：{self.sync_error}", None
-        return True, f"已通过 sway IPC 映射到 {output}（运行时设置，不改配置文件）", None
+    def notice(self, output, n_outputs):
+        if self.sync_error and n_outputs > 1:
+            return f"无法通过 sway IPC 把触摸映射到 {output}：{self.sync_error}", None
+        return None

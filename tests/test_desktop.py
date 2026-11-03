@@ -78,7 +78,7 @@ class HyprlandTests(unittest.TestCase):
         self.assertEqual(b.focused_output(), "DP-2")
         b.touch_sync("DP-2")
         self.assertIn("keyword device[key2touch-virtual-touchscreen]:output DP-2", self.commands)
-        self.assertTrue(b.touch_status("DP-2", 2)[0])
+        self.assertIsNone(b.notice("DP-2", 2))
 
     def test_focus_events(self):
         f = hyprland.HyprlandBackend().focus_source()
@@ -142,7 +142,7 @@ class SwayTests(unittest.TestCase):
         self.assertEqual(b.focused_output(), "DP-2")
         b.touch_sync("DP-2")
         self.assertEqual(self.commands, ['input "4617:1:key2touch_virtual_touchscreen" map_to_output DP-2'])
-        self.assertTrue(b.touch_status("DP-2", 2)[0])
+        self.assertIsNone(b.notice("DP-2", 2))
 
     def test_focus_events(self):
         f = sway.SwayBackend().focus_source()

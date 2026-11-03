@@ -18,16 +18,16 @@ CACHE_DIR = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache") / "
 PROFILE_DIR = CONFIG_DIR / "profiles"
 SETTINGS_FILE = CONFIG_DIR / "settings.json"
 
-LEGACY_CONFIG_DIR = CONFIG_DIR.parent / "waymap"  # the project's previous name
-
 TAP_R = 0.025  # default tap size, fraction of output height
 
 JOY_DIRS = ("up", "left", "down", "right")
 
 DEFAULT_PROFILE = {
     "output": "",
-    "app_id": "(?i)waydroid",
-    "auto_focus": False,
+    "only_focused": False,
+    # app_id rules (shell-style wildcards, case-insensitive); any match counts.
+    # Waydroid is "Waydroid" in full-UI mode and "waydroid.<package>" per app.
+    "windows": ["Waydroid", "waydroid.*"],
     "grab": True,
     "toggle_key": "KEY_F12",
     "toggle_mods": [],
@@ -50,6 +50,7 @@ def normalize(p):
     out = dict(DEFAULT_PROFILE)
     out.update(p or {})
     out["points"] = [dict(pt) for pt in out.get("points", [])]
+    out["windows"] = list(out.get("windows") or [])
     return out
 
 
@@ -94,14 +95,6 @@ def delete(name):
 
 def rename(old, new):
     _path(old).rename(_path(new))
-
-
-def migrate_legacy():
-    """Carry profiles over from the old ~/.config/waymap (first run after the rename)."""
-    if LEGACY_CONFIG_DIR.is_dir() and not CONFIG_DIR.exists():
-        LEGACY_CONFIG_DIR.rename(CONFIG_DIR)
-        return True
-    return False
 
 
 def load_settings():

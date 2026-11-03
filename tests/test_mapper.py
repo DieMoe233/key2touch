@@ -133,5 +133,15 @@ class JoystickTests(unittest.TestCase):
         self.assertEqual(self.t.log[-1], ("move", 0, 0.2, 0.7))
 
 
+class WindowRuleTests(unittest.TestCase):
+    def test_rules(self):
+        from key2touch.engine import window_matches
+        rules = ["Waydroid", "waydroid.*", " "]
+        self.assertTrue(window_matches("Waydroid", rules))
+        self.assertTrue(window_matches("waydroid.com.miHoYo.GenshinImpact", rules))
+        self.assertFalse(window_matches("firefox", rules))
+        self.assertFalse(window_matches(None, rules))
+
+
 if __name__ == "__main__":
     unittest.main()

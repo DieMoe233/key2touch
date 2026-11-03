@@ -13,6 +13,10 @@ Outputs themselves come from GDK in the GUI, which works everywhere.
 
 import os
 
+# Every IPC socket gets a timeout: the engine may hold the keyboard grab while
+# it talks to the compositor, and a blocked engine would mean a dead keyboard.
+IPC_TIMEOUT = 1.0
+
 
 class Backend:
     name = "generic"
@@ -32,17 +36,14 @@ class Backend:
     def focused_output(self):
         return None
 
-    def touch_status(self, output, n_outputs):
-        """-> (ok, subtitle, setup button label or None)"""
-        if n_outputs <= 1:
-            return True, "只有一个输出，无需映射", None
-        return None, (f"请在桌面的输入设备设置里把「key2touch virtual touchscreen」映射到 {output}，"
-                      "否则触摸会落在默认输出上"), None
+    def notice(self, output, n_outputs):
+        """Something the user must act on: (text, button label or None), or None."""
+        return None
 
-    def touch_setup_text(self, output):
+    def setup_text(self, output):
         return ""
 
-    def touch_setup(self, output):
+    def setup(self, output):
         pass
 
     def touch_sync(self, output):

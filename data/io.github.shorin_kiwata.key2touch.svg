@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#8b7cf6"/>
+      <stop offset="1" stop-color="#4f46e5"/>
+    </linearGradient>
+    <linearGradient id="cap" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#ebe9fa"/>
+    </linearGradient>
+  </defs>
+  <rect x="8" y="8" width="112" height="112" rx="28" fill="url(#bg)"/>
+  <!-- keycap, centred; the shadow is a soft halo so it doesn't shift the mass -->
+  <rect x="24" y="24" width="80" height="80" rx="20" fill="#312e81" opacity="0.25" transform="translate(0 3)"/>
+  <rect x="26" y="26" width="76" height="76" rx="19" fill="url(#cap)"/>
+  <!-- tap ripple at the exact centre -->
+  <circle cx="64" cy="64" r="25" fill="none" stroke="#6d5ef0" stroke-width="3" opacity="0.28"/>
+  <circle cx="64" cy="64" r="16" fill="none" stroke="#6d5ef0" stroke-width="3.5" opacity="0.55"/>
+  <circle cx="64" cy="64" r="8" fill="#5b4ee8"/>
+</svg>

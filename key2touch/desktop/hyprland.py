@@ -6,7 +6,7 @@ import socket
 from pathlib import Path
 
 from ..touch import DEVICE_NAME
-from . import Backend
+from . import IPC_TIMEOUT, Backend
 
 # Hyprland names devices lowercased with spaces replaced by dashes.
 HYPR_DEVICE = DEVICE_NAME.lower().replace(" ", "-")
@@ -29,6 +29,7 @@ def _sock_path(name):
 
 def request(cmd):
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+        s.settimeout(IPC_TIMEOUT)
         s.connect(_sock_path(".socket.sock"))
         s.sendall(cmd.encode())
         chunks = []
@@ -44,6 +45,7 @@ def request_json(cmd):
 class HyprlandFocus:
     def __init__(self):
         self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.sock.settimeout(IPC_TIMEOUT)
         self.sock.connect(_sock_path(".socket2.sock"))
         self.buf = b""
         aw = request_json("activewindow") or {}
@@ -104,7 +106,7 @@ class HyprlandBackend(Backend):
         except OSError as ex:
             self.sync_error = str(ex)
 
-    def touch_status(self, output, n_outputs):
-        if self.sync_error:
-            return False, f"hyprctl 设置失败：{self.sync_error}", None
-        return True, f"已通过 hyprctl 映射到 {output}（运行时设置，不改配置文件）", None
+    def notice(self, output, n_outputs):
+        if self.sync_error and n_outputs > 1:
+            return f"无法通过 hyprctl 把触摸映射到 {output}：{self.sync_error}", None
+        return None

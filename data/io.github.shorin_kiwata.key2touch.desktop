@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Name=key2touch
+GenericName=Keyboard to Touch Mapper
+GenericName[zh_CN]=键盘触屏映射
+Comment=Map keyboard keys to touchscreen input on Wayland
+Comment[zh_CN]=将键盘按键映射为触屏操作
+Exec=key2touch
+Icon=io.github.shorin_kiwata.key2touch
+Terminal=false
+Categories=Utility;
+Keywords=waydroid;android;keymapper;touch;keyboard;gamepad;键位;映射;触屏;
+StartupNotify=true
+SingleMainWindow=true

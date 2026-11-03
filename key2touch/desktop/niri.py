@@ -7,7 +7,7 @@ import socket
 from pathlib import Path
 
 from ..profile import CONFIG_DIR
-from . import Backend
+from . import IPC_TIMEOUT, Backend
 
 NIRI_DIR = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "niri"
 
@@ -29,6 +29,7 @@ def socket_path():
 def connect():
     path = socket_path()
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(IPC_TIMEOUT)
     s.connect(path)
     return s
 
@@ -71,8 +72,6 @@ def event_stream():
 
 INCLUDE_FILE = CONFIG_DIR / "niri-touch.kdl"
 INCLUDE_LINE = f'include optional=true "{INCLUDE_FILE}"'
-# Earlier versions: a file in niri's own dir, then ~/.config/waymap/.
-LEGACY_FILES = (NIRI_DIR / "waymap.kdl", CONFIG_DIR.parent / "waymap" / "niri-touch.kdl")
 _INCLUDE_RE = re.compile(r'^\s*include\b.*"([^"]*)"')
 
 
@@ -87,54 +86,41 @@ def write_touch_output(name):
     INCLUDE_FILE.write_text(content)
 
 
-def _include_targets(lines):
-    """[(line index, 'ours' | 'legacy')] for include lines pointing at our files."""
-    out = []
+def _our_include(lines):
+    """Index of the last include line pointing at INCLUDE_FILE, or None."""
+    found = None
     for i, line in enumerate(lines):
         m = _INCLUDE_RE.match(line)
-        if not m:
-            continue
-        target = Path(os.path.expanduser(m.group(1)))
-        if not target.is_absolute():
-            target = NIRI_DIR / target
-        if target == INCLUDE_FILE:
-            out.append((i, "ours"))
-        elif target in LEGACY_FILES:
-            out.append((i, "legacy"))
-    return out
+        if m and Path(os.path.expanduser(m.group(1))) == INCLUDE_FILE:
+            found = i
+    return found
 
 
 def include_status():
-    """'ok' | 'missing' | 'legacy' | 'not_last'"""
+    """'ok' | 'missing' | 'not_last'"""
     try:
         lines = (NIRI_DIR / "config.kdl").read_text().splitlines()
     except OSError:
         return "missing"
-    found = _include_targets(lines)
-    if any(kind == "legacy" for _, kind in found):
-        return "legacy"
-    if not found:
+    i = _our_include(lines)
+    if i is None:
         return "missing"
-    tail = "\n".join(lines[found[-1][0] + 1:])
-    if re.search(r"^\s*(touch\s*\{|include\b)", tail, re.M):
+    if re.search(r"^\s*(touch\s*\{|include\b)", "\n".join(lines[i + 1:]), re.M):
         return "not_last"
     return "ok"
 
 
 def add_include(output):
-    """Point config.kdl at our include file (migrating the old in-niri-dir file)."""
     write_touch_output(output)
-    cfg = NIRI_DIR / "config.kdl"
-    lines = cfg.read_text().splitlines()
-    found = _include_targets(lines)
-    if found:
-        for i, _ in found:
-            lines[i] = INCLUDE_LINE
-    else:
-        lines += ["", "// key2touch: virtual touchscreen output mapping (keep last)", INCLUDE_LINE]
-    cfg.write_text("\n".join(lines) + "\n")
-    for f in LEGACY_FILES:
-        f.unlink(missing_ok=True)
+    # resolve(): config.kdl is often a symlink into a dotfiles repo; keep it one.
+    cfg = (NIRI_DIR / "config.kdl").resolve()
+    text = cfg.read_text()
+    if not text.endswith("\n"):
+        text += "\n"
+    text += "\n// key2touch: virtual touchscreen output mapping (keep last)\n" + INCLUDE_LINE + "\n"
+    tmp = cfg.with_name(cfg.name + ".key2touch-tmp")
+    tmp.write_text(text)
+    tmp.replace(cfg)  # atomic: niri never sees a half-written config
 
 
 class NiriFocus:
@@ -212,25 +198,23 @@ class NiriBackend(Backend):
         except (OSError, RuntimeError):
             return None
 
-    def touch_status(self, output, n_outputs):
+    def notice(self, output, n_outputs):
         st = include_status()
-        return {
-            "ok": (True, f"虚拟触摸屏已映射到 {output}", None),
-            "missing": (False, "未配置：触摸会落在 niri 的第一个输出上", "写入"),
-            "legacy": (False, "include 指向旧版文件，需要迁移到 ~/.config/key2touch", "迁移"),
-            "not_last": (None, "include 之后还有其他 include / touch 设置，可能被覆盖", None),
-        }[st]
+        if st == "missing":
+            return "niri 需要在配置里加一行，触摸才能落到所选的显示器上", "设置"
+        if st == "not_last":
+            return "niri 配置里 key2touch 的 include 之后还有其他 include / touch 设置，触摸映射可能被覆盖", None
+        return None
 
-    def touch_setup_text(self, output):
-        return ("niri 只能通过自身配置指定触摸屏映射到哪个输出（没有按设备的映射，也没有 IPC），"
-                "所以需要在 ~/.config/niri/config.kdl 末尾放这一行：\n\n"
+    def setup_text(self, output):
+        return ("niri 只能通过自身配置指定触摸屏映射到哪个显示器，"
+                "所以需要在 ~/.config/niri/config.kdl 末尾加这一行：\n\n"
                 f"{INCLUDE_LINE}\n\n"
-                "被引用的文件放在 ~/.config/key2touch/，由 key2touch 自动维护；"
-                "旧版本留下的 waymap.kdl / niri-touch.kdl 会被删除，include 行会被改写。")
+                "被引用的文件放在 ~/.config/key2touch/，切换显示器时由 key2touch 自动改写。")
 
-    def touch_setup(self, output):
+    def setup(self, output):
         add_include(output)
 
     def touch_sync(self, output):
-        if include_status() == "ok":
+        if include_status() != "missing":
             write_touch_output(output)

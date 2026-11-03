@@ -5,10 +5,10 @@ stdin  ← JSON lines from GUI: {"cmd": "profile", "profile": {...}, "aspect": w
 stdout → JSON lines to GUI:   {"ev": "state", ...} | {"ev": "key", "code": n, "down": b}
 """
 
+import fnmatch
 import gc
 import json
 import os
-import re
 import resource
 import select
 import subprocess
@@ -53,6 +53,14 @@ def raise_priority():
     return "normal"
 
 
+def window_matches(app_id, rules):
+    """Shell-style, case-insensitive: "Waydroid", "waydroid.*" ..."""
+    if not app_id:
+        return False
+    app_id = app_id.lower()
+    return any(fnmatch.fnmatchcase(app_id, r.strip().lower()) for r in rules if r.strip())
+
+
 def is_keyboard(dev):
     if dev.name.startswith(OWN_PREFIX):
         return False
@@ -75,7 +83,6 @@ class Engine:
         self.toggle_mods = frozenset()
         self.toggle_down = False  # the hotkey press was consumed; swallow its release too
         self.enabled = True
-        self.app_re = None
         self.backend = desktop.detect()
         self.focus_src = None  # None: this desktop can't report focus
         self.focus_app = None
@@ -174,10 +181,9 @@ class Engine:
     # ---- state ----
     def update_active(self):
         focus_ok = True
-        if (self.focus_src and self.profile.get("auto_focus", False)
-                and self.app_re and self.profile.get("app_id")):
-            app = self.focus_app
-            focus_ok = bool(app and self.app_re.search(app))
+        rules = self.profile.get("windows") or []
+        if self.focus_src and self.profile.get("only_focused", False) and rules:
+            focus_ok = window_matches(self.focus_app, rules)
         active = self.enabled and focus_ok and bool(self.mapper.bindings)
         if active != self.active:
             self.active = active
@@ -194,10 +200,6 @@ class Engine:
         self.mapper.mods_down = mods
         self.toggle = keycode(prof.get("toggle_key"))
         self.toggle_mods = frozenset(prof.get("toggle_mods") or ())
-        try:
-            self.app_re = re.compile(prof.get("app_id") or "")
-        except re.error:
-            self.app_re = None
         self.update_active()
 
     # ---- event handling (hot path) ----

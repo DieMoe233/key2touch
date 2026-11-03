@@ -1,4 +1,9 @@
-"""Control window (libadwaita): profiles, target, options; owns engine + HUD."""
+"""Control window (libadwaita); owns the engine process and the HUD.
+
+The main page follows what a user does, top to bottom: edit the layout,
+turn mapping on (with its hotkey next to it), pick the display.  Everything
+else lives in the advanced settings dialog.
+"""
 
 import copy
 import json
@@ -14,7 +19,7 @@ gi.require_version("Gdk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Adw, Gdk, Gio, GLib, Gtk  # noqa: E402
 
-from . import desktop, profile as prof  # noqa: E402
+from . import desktop, profile as prof, tray  # noqa: E402
 from .mapper import MOD_ORDER  # noqa: E402
 from .overlay import MOD_LABEL, MOD_NAME_GROUP, LS, Overlay, combo_label, key_name  # noqa: E402
 
@@ -29,6 +34,7 @@ window.key2touch-overlay, window.key2touch-overlay > * { background: transparent
 .key2touch-toast {
   background: alpha(@window_bg_color, 0.94); border-radius: 99px; padding: 6px 16px;
 }
+.key2touch-hero { padding: 18px 48px; font-size: 1.25em; font-weight: bold; }
 """
 
 
@@ -86,25 +92,38 @@ def gdk_outputs():
         if not name:
             continue
         g = m.get_geometry()
-        out[name] = {"x": g.x, "y": g.y, "width": g.width, "height": g.height, "scale": m.get_scale()}
+        out[name] = {"x": g.x, "y": g.y, "width": g.width, "height": g.height,
+                     "scale": m.get_scale(), "model": m.get_model() or ""}
     return out
 
 
+APP_ID = "io.github.shorin_kiwata.key2touch"
+DATA_DIR = Path(__file__).resolve().parent.parent / "data"  # icon when run from source
+
+
+def open_dir(path):
+    path.mkdir(parents=True, exist_ok=True)
+    Gio.AppInfo.launch_default_for_uri(path.as_uri(), None)
+
+
 class Key2Touch(Adw.Application):
-    def __init__(self, initial=None):
-        super().__init__(application_id="io.github.shorin_kiwata.key2touch")
+    def __init__(self, initial=None, hidden=False):
+        super().__init__(application_id=APP_ID)
         self.initial = initial
+        self.start_hidden = hidden
+        self.tray = None
         self.engine = None
         self.hud = None
         self.editor = None
+        self.prefs = None
         self.engine_state = {"active": False, "enabled": True}
         self._syncing = False
         self.capturing_hotkey = False
+        self.hk_mods = []  # modifier key names held while capturing the hotkey
+        self.hk_solo = False
         self.backend = desktop.detect()
         self.layer_shell = LS.is_supported()
         self.synced_after_start = False
-        self.hk_mods = []  # modifier key names held while capturing the hotkey
-        self.hk_solo = False
 
     # ================================================================ model
     def profile_names(self):
@@ -142,7 +161,8 @@ class Key2Touch(Adw.Application):
         out = self.outputs[self.profile["output"]]
         self.backend.touch_sync(self.profile["output"])
         self.engine.send(cmd="profile", profile=self.profile, aspect=out["width"] / out["height"])
-        self.refresh_touch_row()
+        self.refresh_banner()
+        self.refresh_layout_page()
         self.refresh_status()
         self.rebuild_hud()
 
@@ -152,19 +172,21 @@ class Key2Touch(Adw.Application):
         self.profile[k] = v
         self.apply()
 
-    # ================================================================ UI
+    # ================================================================ main window
     def do_activate(self):
-        if self.get_windows():
-            self.get_windows()[0].present()
+        if getattr(self, "win", None):
+            self.show_window()  # launched again: bring the (possibly hidden) window back
             return
         css = Gtk.CssProvider()
         css.load_from_data(CSS)
         Gtk.StyleContext.add_provider_for_display(Gdk.Display.get_default(), css,
                                                   Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
         Adw.StyleManager.get_default().set_color_scheme(Adw.ColorScheme.PREFER_DARK)
+        if DATA_DIR.is_dir():
+            Gtk.IconTheme.get_for_display(Gdk.Display.get_default()).add_search_path(str(DATA_DIR))
+        Gtk.Window.set_default_icon_name(APP_ID)
         self.outputs = gdk_outputs()
         self.out_names = sorted(self.outputs)
-        migrated = prof.migrate_legacy()
         self.settings = prof.load_settings()
 
         names = prof.list_profiles()
@@ -178,16 +200,26 @@ class Key2Touch(Adw.Application):
         prof.save(name, self.profile)
 
         self.win = Adw.ApplicationWindow(application=self, title="key2touch",
-                                         default_width=560, default_height=780)
-        self.win.connect("close-request", lambda *_: self.quit() or False)
+                                         default_width=520, default_height=700)
+        self.win.connect("close-request", self._on_close)
+        # Losing focus mid-capture would otherwise leave mapping disabled.
+        self.win.connect("notify::is-active",
+                         lambda w, _: self.capturing_hotkey and not w.is_active() and self._finish_hotkey())
         self.toasts = Adw.ToastOverlay()
         view = Adw.ToolbarView()
         view.add_top_bar(self._build_header())
-        page = Adw.PreferencesPage()
-        for g in (self._group_status(), self._group_target(), self._group_keyboard(),
-                  self._group_hud(), self._group_files()):
-            page.add(g)
-        view.set_content(page)
+        self.banner = Adw.Banner()
+        self.banner.connect("button-clicked", self._on_banner_button)
+        view.add_top_bar(self.banner)
+
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=24,
+                      margin_top=12, margin_bottom=24, margin_start=12, margin_end=12)
+        box.append(self._build_layout_page())
+        box.append(self._build_run_group())
+        box.append(self._build_output_group())
+        box.append(self._build_footer())
+        clamp = Adw.Clamp(maximum_size=520, child=box)
+        view.set_content(Gtk.ScrolledWindow(child=clamp, hscrollbar_policy=Gtk.PolicyType.NEVER))
         self.toasts.set_child(view)
         self.win.set_content(self.toasts)
 
@@ -199,14 +231,47 @@ class Key2Touch(Adw.Application):
         self._setup_actions()
         self.engine = EngineProc(self.on_engine)
         self.load_into_ui()
-        self.win.present()
-        if migrated:
-            self.toast("已从 ~/.config/waymap 迁移配置")
+        self._setup_tray()
+        if not (self.start_hidden and self.tray):
+            self.win.present()
 
     def do_shutdown(self):
+        if self.tray:
+            self.tray.close()
         if self.engine:
             self.engine.stop()
         Adw.Application.do_shutdown(self)
+
+    # ---- tray / background ----
+    def _setup_tray(self):
+        if not tray.available():
+            return  # no tray host: closing the window quits, so nothing runs invisibly
+        self.tray = tray.Tray(APP_ID, "key2touch", APP_ID, str(DATA_DIR) if DATA_DIR.is_dir() else "", [
+            {"label": "显示主窗口", "action": self.show_window},
+            {"label": "启用映射", "action": lambda: self.enable_row.set_active(not self.enable_row.get_active()),
+             "checked": lambda: self.enable_row.get_active()},
+            {"label": "编辑布局", "action": self.on_edit},
+            None,
+            {"label": "退出", "action": self.quit},
+        ], on_activate=self.toggle_window)
+        self.hold()  # keep running with the window hidden
+
+    def show_window(self):
+        self.win.set_visible(True)
+        self.win.present()
+
+    def toggle_window(self):
+        if self.win.get_visible():
+            self.win.set_visible(False)
+        else:
+            self.show_window()
+
+    def _on_close(self, win):
+        if self.tray:
+            win.set_visible(False)  # keep mapping in the background; quit from the tray menu
+            return True
+        self.quit()
+        return False
 
     def toast(self, text):
         self.toasts.add_toast(Adw.Toast(title=text, timeout=2))
@@ -223,121 +288,262 @@ class Key2Touch(Adw.Application):
         menu.append("复制当前配置…", "app.dup-profile")
         menu.append("重命名…", "app.rename-profile")
         menu.append("删除当前配置…", "app.delete-profile")
-        sec = Gio.Menu()
-        sec.append("打开配置文件夹", "app.open-config")
-        menu.append_section(None, sec)
         hb.pack_end(Gtk.MenuButton(icon_name="open-menu-symbolic", menu_model=menu, tooltip_text="配置管理"))
+
         return hb
 
-    def _group_status(self):
+    def _build_footer(self):
+        box = Gtk.Box(spacing=12, halign=Gtk.Align.CENTER)
+        gear = Gtk.Button(child=Adw.ButtonContent(icon_name="emblem-system-symbolic", label="高级设置"))
+        gear.add_css_class("pill")
+        gear.connect("clicked", self.show_prefs)
+        box.append(gear)
+
+        folders = Gio.Menu()
+        folders.append("打开配置目录", "app.open-config")
+        folders.append("打开缓存目录", "app.open-cache")
+        fb = Gtk.MenuButton(menu_model=folders, always_show_arrow=True,
+                            child=Adw.ButtonContent(icon_name="folder-symbolic", label="文件夹"))
+        fb.add_css_class("pill")
+        box.append(fb)
+        return box
+
+    def _build_layout_page(self):
+        # Doubles as the empty state: with no points it tells a new user what to do.
+        self.layout_page = Adw.StatusPage(icon_name=APP_ID)
+        self.layout_page.add_css_class("compact")
+        btn = Gtk.Button(label="编辑布局", halign=Gtk.Align.CENTER)
+        btn.add_css_class("pill")
+        btn.add_css_class("suggested-action")
+        btn.add_css_class("key2touch-hero")
+        btn.connect("clicked", self.on_edit)
+        self.edit_btn = btn
+        self.layout_page.set_child(btn)
+        return self.layout_page
+
+    def _build_run_group(self):
         g = Adw.PreferencesGroup()
-        self.status_row = Adw.ActionRow(title="状态")
-        self.status_icon = Gtk.Image(icon_name="media-playback-pause-symbolic")
-        self.status_row.add_prefix(self.status_icon)
-        self.enable_sw = Gtk.Switch(valign=Gtk.Align.CENTER, active=True, tooltip_text="映射开关")
-        self.enable_sw.connect("notify::active", self._on_enable)
-        self.status_row.add_suffix(self.enable_sw)
-        self.status_row.set_activatable_widget(self.enable_sw)
-        g.add(self.status_row)
-
-        edit = Adw.ButtonRow(title="编辑布局", start_icon_name="document-edit-symbolic")
-        edit.add_css_class("suggested-action")
-        edit.connect("activated", self.on_edit)
-        g.add(edit)
-        return g
-
-    def _group_target(self):
-        g = Adw.PreferencesGroup(title="目标")
-        labels = [f"{n}  ·  {o['width']}×{o['height']}  @{o['scale']:g}x"
-                  for n, o in ((n, self.outputs[n]) for n in self.out_names)]
-        self.out_row = Adw.ComboRow(title="输出", subtitle="游戏窗口所在的屏幕",
-                                    model=Gtk.StringList.new(labels))
-        self.out_row.connect("notify::selected", self._on_output)
-        g.add(self.out_row)
-
-        self.touch_row = Adw.ActionRow(title="触摸映射")
-        self.touch_icon = Gtk.Image()
-        self.touch_row.add_prefix(self.touch_icon)
-        self.touch_btn = Gtk.Button(valign=Gtk.Align.CENTER)
-        self.touch_btn.add_css_class("suggested-action")
-        self.touch_btn.connect("clicked", self._on_touch_btn)
-        self.touch_row.add_suffix(self.touch_btn)
-        g.add(self.touch_row)
-
-        focus_sub = ("焦点在其他窗口时键盘照常使用" if self.backend.supports_focus
-                     else f"当前桌面（{self.backend.label}）无法获取窗口焦点，请用开关热键手动启停")
-        self.focus_row = Adw.ExpanderRow(title="仅在指定窗口获得焦点时生效",
-                                         subtitle=focus_sub, show_enable_switch=True,
-                                         sensitive=self.backend.supports_focus)
-        self.focus_row.connect("notify::enable-expansion",
-                               lambda r, _: self.set_opt("auto_focus", r.get_enable_expansion()))
-        self.app_row = Adw.EntryRow(title="窗口 app_id（正则）", show_apply_button=True)
-        self.app_row.connect("apply", lambda r: self.set_opt("app_id", r.get_text()))
-        pick = Gtk.MenuButton(icon_name="view-list-symbolic", valign=Gtk.Align.CENTER,
-                              tooltip_text="从当前打开的窗口选择")
-        pick.add_css_class("flat")
-        pick.set_create_popup_func(self._fill_window_picker)
-        self.app_row.add_suffix(pick)
-        self.focus_row.add_row(self.app_row)
-        g.add(self.focus_row)
-        return g
-
-    def _group_keyboard(self):
-        g = Adw.PreferencesGroup(title="键盘")
-        self.grab_row = Adw.SwitchRow(title="独占键盘",
-                                      subtitle="生效时已映射的键只变成触摸，不再传给应用")
-        self.grab_row.connect("notify::active", lambda r, _: self.set_opt("grab", r.get_active()))
-        g.add(self.grab_row)
-        self.hotkey_row = Adw.ActionRow(title="开关热键", subtitle="随时启停映射（全局有效）")
-        self.hotkey_btn = Gtk.Button(valign=Gtk.Align.CENTER)
+        self.enable_row = Adw.SwitchRow(title="启用映射", active=True)
+        self.enable_row.connect("notify::active", self._on_enable)
+        g.add(self.enable_row)
+        self.hotkey_row = Adw.ActionRow(title="开关热键", subtitle="在任何窗口下按下都能开关映射")
+        self.hotkey_btn = Gtk.Button(valign=Gtk.Align.CENTER, tooltip_text="点击后按下新的按键或组合键")
         self.hotkey_btn.connect("clicked", self._on_hotkey_btn)
         self.hotkey_row.add_suffix(self.hotkey_btn)
+        self.hotkey_row.set_activatable_widget(self.hotkey_btn)
         g.add(self.hotkey_row)
         return g
 
-    def _group_hud(self):
-        g = Adw.PreferencesGroup(title="HUD")
-        self.hud_row = Adw.SwitchRow(
-            title="显示 HUD",
-            subtitle=("在屏幕上显示按键位置，按下时高亮" if self.layer_shell
-                      else "当前桌面不支持 wlr-layer-shell，HUD 不可用"),
-            active=self.settings.get("hud", True), sensitive=self.layer_shell)
-        self.hud_row.connect("notify::active", self._on_hud_setting)
-        g.add(self.hud_row)
-        row = Adw.ActionRow(title="不透明度")
-        self.opacity = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0.15, 1.0, 0.05)
-        self.opacity.set_value(self.settings.get("hud_opacity", 0.6))
-        self.opacity.set_draw_value(False)
-        self.opacity.set_hexpand(True)
-        self.opacity.set_size_request(200, -1)
-        self.opacity.connect("value-changed", self._on_hud_setting)
-        row.add_suffix(self.opacity)
-        g.add(row)
+    def _build_output_group(self):
+        g = Adw.PreferencesGroup()
+        # Keep entries short (they ellipsize); the model goes in the subtitle.
+        labels = [f"{n} · {self.outputs[n]['width']}×{self.outputs[n]['height']}" for n in self.out_names]
+        self.out_row = Adw.ComboRow(title="应用于显示器", model=Gtk.StringList.new(labels))
+        self.out_row.connect("notify::selected", self._on_output)
+        g.add(self.out_row)
         return g
 
-    def _group_files(self):
-        g = Adw.PreferencesGroup(title="文件")
-        self.file_row = Adw.ActionRow(title="当前配置文件", subtitle_selectable=True)
-        btn = Gtk.Button(icon_name="folder-open-symbolic", valign=Gtk.Align.CENTER, tooltip_text="打开文件夹")
-        btn.add_css_class("flat")
-        btn.connect("clicked", lambda *_: self.activate_action("open-config"))
-        self.file_row.add_suffix(btn)
-        g.add(self.file_row)
-        g.add(Adw.ActionRow(title="缓存与日志", subtitle=str(prof.CACHE_DIR), subtitle_selectable=True))
-        return g
+    def refresh_layout_page(self):
+        n = len(self.profile["points"])
+        if n == 0:
+            self.layout_page.set_title("还没有按键点")
+            self.layout_page.set_description("打开编辑器，在游戏画面上点击要触摸的位置，再按下对应的键。")
+            self.edit_btn.set_label("开始编辑布局")
+        else:
+            joys = sum(p["type"] == "joystick" for p in self.profile["points"])
+            parts = [f"{n - joys} 个按键"] + ([f"{joys} 个摇杆"] if joys else [])
+            self.layout_page.set_title(self.name)
+            self.layout_page.set_description("，".join(parts))
+            self.edit_btn.set_label("编辑布局")
+
+    def refresh_banner(self):
+        notice = self.backend.notice(self.profile["output"], len(self.outputs))
+        if notice:
+            text, button = notice
+            self.banner.set_title(text)
+            self.banner.set_button_label(button)
+        self.banner.set_revealed(bool(notice))
+
+    def _on_banner_button(self, *_):
+        dlg = Adw.AlertDialog(heading=f"设置 {self.backend.label}",
+                              body=self.backend.setup_text(self.profile["output"]))
+        dlg.add_response("cancel", "取消")
+        dlg.add_response("ok", "写入配置")
+        dlg.set_response_appearance("ok", Adw.ResponseAppearance.SUGGESTED)
+
+        def resp(d, r):
+            if r != "ok":
+                return
+            try:
+                self.backend.setup(self.profile["output"])
+                self.toast("已写入，配置会自动重载")
+            except OSError as ex:
+                self.toast(f"写入失败：{ex}")
+            self.refresh_banner()
+
+        dlg.connect("response", resp)
+        dlg.present(self.win)
 
     def _setup_actions(self):
         for name, cb in (("new-profile", lambda *_: self._ask_name("新建配置", "", self._do_new)),
                          ("dup-profile", lambda *_: self._ask_name("复制配置", f"{self.name} 副本", self._do_dup)),
                          ("rename-profile", lambda *_: self._ask_name("重命名配置", self.name, self._do_rename)),
                          ("delete-profile", self._ask_delete),
-                         ("open-config", lambda *_: Gio.AppInfo.launch_default_for_uri(
-                             prof.PROFILE_DIR.as_uri(), None))):
+                         ("open-config", lambda *_: open_dir(prof.CONFIG_DIR)),
+                         ("open-cache", lambda *_: open_dir(prof.CACHE_DIR))):
             a = Gio.SimpleAction.new(name, None)
             a.connect("activate", cb)
             self.add_action(a)
 
-    # ---- profile dialogs ----
+    # ================================================================ advanced settings
+    def show_prefs(self, *_):
+        dlg = Adw.PreferencesDialog(title="高级设置", search_enabled=False)
+        page = Adw.PreferencesPage(title="高级", icon_name="emblem-system-symbolic")
+        dlg.add(page)
+
+        g = Adw.PreferencesGroup(title="键盘")
+        grab = Adw.SwitchRow(title="已映射的键不再传给应用",
+                             subtitle="映射生效时，这些键只会变成触摸，游戏收不到按键本身",
+                             active=self.profile.get("grab", True))
+        grab.connect("notify::active", lambda r, _: self.set_opt("grab", r.get_active()))
+        g.add(grab)
+        page.add(g)
+
+        for grp in self._build_window_rules():
+            page.add(grp)
+
+        g = Adw.PreferencesGroup(title="外观")
+        hud = Adw.SwitchRow(title="显示 HUD",
+                            subtitle=("在屏幕上显示按键位置，按下时高亮" if self.layer_shell
+                                      else "当前桌面不支持 wlr-layer-shell，HUD 不可用"),
+                            active=self.settings.get("hud", True), sensitive=self.layer_shell)
+        row = Adw.ActionRow(title="HUD 不透明度", sensitive=self.layer_shell)
+        opacity = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0.15, 1.0, 0.05)
+        opacity.set_value(self.settings.get("hud_opacity", 0.6))
+        opacity.set_draw_value(False)
+        opacity.set_hexpand(True)
+        opacity.set_size_request(180, -1)
+        row.add_suffix(opacity)
+
+        def hud_changed(*_):
+            self.settings["hud"] = hud.get_active()
+            self.settings["hud_opacity"] = round(opacity.get_value(), 2)
+            prof.save_settings(self.settings)
+            self.update_hud()
+
+        hud.connect("notify::active", hud_changed)
+        opacity.connect("value-changed", hud_changed)
+        g.add(hud)
+        g.add(row)
+        page.add(g)
+
+        g = Adw.PreferencesGroup(title="运行状态")
+        self.diag_rows = {}
+        for key, title in (("desktop", "桌面"), ("focus", "当前焦点窗口"), ("keyboards", "键盘"),
+                           ("priority", "引擎调度")):
+            r = Adw.ActionRow(title=title, subtitle_selectable=True)
+            r.add_css_class("property")
+            self.diag_rows[key] = r
+            g.add(r)
+        page.add(g)
+        self.prefs = dlg
+        self.refresh_diag()
+
+        dlg.connect("closed", lambda *_: setattr(self, "prefs", None))
+        dlg.present(self.win)
+
+    def _build_window_rules(self):
+        g = Adw.PreferencesGroup(title="窗口")
+        only = Adw.SwitchRow(title="仅聚焦指定软件窗口时生效",
+                             active=self.profile.get("only_focused", False) and self.backend.supports_focus,
+                             sensitive=self.backend.supports_focus)
+        only.set_subtitle("焦点切到其他窗口时，键盘照常使用" if self.backend.supports_focus
+                          else f"当前桌面（{self.backend.label}）无法获取窗口焦点，请用开关热键手动开关")
+        g.add(only)
+
+        rules = Adw.PreferencesGroup(title="窗口匹配规则",
+                                     description="填写窗口的 app_id，可用 * 通配，不区分大小写；任意一条匹配即生效。")
+        rules.set_sensitive(only.get_active())
+        only.connect("notify::active", lambda r, _: (rules.set_sensitive(r.get_active()),
+                                                      self.set_opt("only_focused", r.get_active())))
+        rows = []
+
+        def rebuild():
+            for r in rows:
+                rules.remove(r)
+            rows.clear()
+            for i, pat in enumerate(self.profile["windows"]):
+                r = Adw.ActionRow(title=pat)
+                rm = Gtk.Button(icon_name="user-trash-symbolic", valign=Gtk.Align.CENTER, tooltip_text="删除")
+                rm.add_css_class("flat")
+                rm.connect("clicked", lambda _b, i=i: remove(i))
+                r.add_suffix(rm)
+                rules.add(r)
+                rows.append(r)
+            rules.add(add_row)
+            rows.append(add_row)
+
+        def remove(i):
+            del self.profile["windows"][i]
+            self.apply()
+            rebuild()
+
+        def add(pat):
+            pat = pat.strip()
+            if pat and pat not in self.profile["windows"]:
+                self.profile["windows"].append(pat)
+                self.apply()
+            add_row.set_text("")
+            rebuild()
+
+        add_row = Adw.EntryRow(title="添加规则，例如 waydroid.*", show_apply_button=True)
+        add_row.connect("apply", lambda r: add(r.get_text()))
+        add_row.connect("entry-activated", lambda r: add(r.get_text()))
+        pick = Gtk.MenuButton(icon_name="list-add-symbolic", valign=Gtk.Align.CENTER,
+                              tooltip_text="从当前打开的窗口添加")
+        pick.add_css_class("flat")
+        pick.set_create_popup_func(lambda btn: self._fill_window_picker(btn, add))
+        add_row.add_suffix(pick)
+        rebuild()
+        return g, rules
+
+    def _fill_window_picker(self, btn, add):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2, margin_top=6,
+                      margin_bottom=6, margin_start=6, margin_end=6)
+        seen = set()
+        for w in self.backend.windows():
+            app = w.get("app_id")
+            if not app or app in seen or app == self.get_application_id():
+                continue
+            seen.add(app)
+            b = Gtk.Button(label=f"{app}  —  {(w.get('title') or '')[:30]}")
+            b.add_css_class("flat")
+            b.get_child().set_xalign(0)
+
+            def pick(_b, app=app):
+                btn.popdown()
+                add(app)
+
+            b.connect("clicked", pick)
+            box.append(b)
+        if not seen:
+            box.append(Gtk.Label(label="没有其他窗口"))
+        btn.set_popover(Gtk.Popover(child=box))
+
+    def refresh_diag(self):
+        if not self.prefs:
+            return
+        st = self.engine_state
+        values = {
+            "desktop": self.backend.label + ("" if self.backend.supports_focus else "（无焦点信息）"),
+            "focus": st.get("focus") or "-",
+            "keyboards": f"{st.get('keyboards', 0)} 个",
+            "priority": st.get("priority", "-"),
+        }
+        for k, r in self.diag_rows.items():
+            r.set_subtitle(str(values[k]))
+
+    # ================================================================ profiles
     def _ask_name(self, heading, initial, done):
         dlg = Adw.AlertDialog(heading=heading)
         entry = Gtk.Entry(text=initial, activates_default=True)
@@ -408,78 +614,26 @@ class Key2Touch(Adw.Application):
             self.save_current()
             self.switch_profile(name)
 
-    # ---- syncing model → widgets ----
     def load_into_ui(self):
         self._syncing = True
-        p = self.profile
         self.reload_profile_list()
-        self.out_row.set_selected(self.out_names.index(p["output"]))
-        self.focus_row.set_enable_expansion(p.get("auto_focus", False))
-        self.app_row.set_text(p.get("app_id") or "")
-        self.grab_row.set_active(p.get("grab", True))
+        self.out_row.set_selected(self.out_names.index(self.profile["output"]))
+        self._update_output_subtitle()
         self.hotkey_btn.set_label(self.hotkey_label() or "未设置")
-        self.file_row.set_subtitle(str(prof.PROFILE_DIR / f"{self.name}.json"))
         self._syncing = False
+        if self.prefs:
+            self.prefs.close()  # its widgets show the previous profile
         self.apply()
 
-    def refresh_touch_row(self):
-        ok, sub, btn = self.backend.touch_status(self.profile["output"], len(self.outputs))
-        self.touch_row.set_subtitle(sub)
-        self.touch_icon.set_from_icon_name({True: "emblem-ok-symbolic", False: "dialog-warning-symbolic",
-                                            None: "dialog-information-symbolic"}[ok])
-        self.touch_btn.set_visible(btn is not None)
-        if btn:
-            self.touch_btn.set_label(btn)
-
-    def _on_touch_btn(self, *_):
-        dlg = Adw.AlertDialog(heading=f"配置 {self.backend.label} 触摸映射",
-                              body=self.backend.touch_setup_text(self.profile["output"]))
-        dlg.add_response("cancel", "取消")
-        dlg.add_response("ok", "确定")
-        dlg.set_response_appearance("ok", Adw.ResponseAppearance.SUGGESTED)
-
-        def resp(d, r):
-            if r != "ok":
-                return
-            try:
-                self.backend.touch_setup(self.profile["output"])
-                self.toast("已写入，桌面会自动重载")
-            except OSError as ex:
-                self.toast(f"写入失败：{ex}")
-            self.refresh_touch_row()
-
-        dlg.connect("response", resp)
-        dlg.present(self.win)
-
     def _on_output(self, row, _):
+        self._update_output_subtitle()
         self.set_opt("output", self.out_names[row.get_selected()])
 
-    def _fill_window_picker(self, btn):
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2, margin_top=6,
-                      margin_bottom=6, margin_start=6, margin_end=6)
-        wins = self.backend.windows()
-        seen = set()
-        for w in wins:
-            app = w.get("app_id")
-            if not app or app in seen or app == self.get_application_id():
-                continue
-            seen.add(app)
-            b = Gtk.Button(label=f"{app}  —  {(w.get('title') or '')[:30]}")
-            b.add_css_class("flat")
+    def _update_output_subtitle(self):
+        o = self.outputs[self.out_names[self.out_row.get_selected()]]
+        self.out_row.set_subtitle("游戏窗口所在的显示器" + (f"（{o['model']}）" if o["model"] else ""))
 
-            def pick(_b, app=app):
-                regex = "^" + GLib.Regex.escape_string(app, -1) + "$"
-                self.app_row.set_text(regex)
-                self.set_opt("app_id", regex)
-                btn.popdown()
-
-            b.connect("clicked", pick)
-            box.append(b)
-        if not seen:
-            box.append(Gtk.Label(label="没有其他窗口"))
-        btn.set_popover(Gtk.Popover(child=box))
-
-    # ---- hotkey capture ----
+    # ================================================================ hotkey
     def hotkey_label(self):
         p = self.profile
         return combo_label(p["toggle_key"], p.get("toggle_mods")) if p.get("toggle_key") else None
@@ -488,17 +642,19 @@ class Key2Touch(Adw.Application):
         self.capturing_hotkey = True
         self.hk_mods.clear()
         self.hk_solo = False
-        self.hotkey_btn.set_label("按下按键或组合键… (Esc 取消)")
+        self.hotkey_btn.set_label("按下按键或组合键…")
+        self.hotkey_row.set_subtitle("Esc 取消")
         self.engine.send(cmd="enable", on=False)  # so the old hotkey can't toggle meanwhile
 
     def _finish_hotkey(self, name=None, mods=()):
         self.capturing_hotkey = False
         self.hk_mods.clear()
-        self.engine.send(cmd="enable", on=self.enable_sw.get_active())
+        self.engine.send(cmd="enable", on=self.enable_row.get_active())
         if name:
             self.profile["toggle_mods"] = [m for m in MOD_ORDER if m in mods]
             self.set_opt("toggle_key", name)
         self.hotkey_btn.set_label(self.hotkey_label() or "未设置")
+        self.hotkey_row.set_subtitle("在任何窗口下按下都能开关映射")
 
     def _on_window_key(self, c, keyval, keycode, state):
         if not self.capturing_hotkey:
@@ -532,9 +688,9 @@ class Key2Touch(Adw.Application):
             self.hk_mods.remove(name)
 
     # ================================================================ engine
-    def _on_enable(self, sw, _):
+    def _on_enable(self, row, _):
         if not self._syncing:
-            self.engine.send(cmd="enable", on=sw.get_active())
+            self.engine.send(cmd="enable", on=row.get_active())
 
     def on_engine(self, msg):
         ev = msg.get("ev")
@@ -547,17 +703,18 @@ class Key2Touch(Adw.Application):
                 # The virtual touchscreen exists now: (re)apply per-device mapping.
                 self.synced_after_start = True
                 self.backend.touch_sync(self.profile["output"])
-                self.refresh_touch_row()
-            if not self.editor and not self.capturing_hotkey and self.enable_sw.get_active() != msg["enabled"]:
+                self.refresh_banner()
+            if not self.editor and not self.capturing_hotkey and self.enable_row.get_active() != msg["enabled"]:
                 self._syncing = True
-                self.enable_sw.set_active(msg["enabled"])
+                self.enable_row.set_active(msg["enabled"])
                 self._syncing = False
+            if self.tray:
+                self.tray.refresh()
             self.refresh_status()
+            self.refresh_diag()
             self.update_hud()
         elif ev == "exit":
-            self.status_row.set_title("引擎已退出")
-            self.status_row.set_subtitle(f"code {msg.get('code')}，日志：{prof.CACHE_DIR / 'engine.log'}")
-            self.status_icon.set_from_icon_name("dialog-error-symbolic")
+            self.enable_row.set_subtitle(f"引擎已退出（code {msg.get('code')}），日志在缓存目录的 engine.log")
 
     def refresh_status(self):
         st = self.engine_state
@@ -565,29 +722,18 @@ class Key2Touch(Adw.Application):
             return
         hotkey = self.hotkey_label()
         if self.editor:
-            title, icon = "编辑中", "document-edit-symbolic"
+            text = "编辑布局中"
         elif st["active"]:
-            title, icon = "生效中", "media-playback-start-symbolic"
+            text = "生效中"
         elif not st["enabled"]:
-            title, icon = "已关闭" + (f"（按 {hotkey} 开启）" if hotkey else ""), "media-playback-pause-symbolic"
+            text = f"已关闭，按 {hotkey} 开启" if hotkey else "已关闭"
         elif not self.profile["points"]:
-            title, icon = "没有按键点，先编辑布局", "dialog-information-symbolic"
+            text = "还没有按键点，先编辑布局"
         else:
-            title, icon = "等待目标窗口获得焦点", "content-loading-symbolic"
-        n = len(self.profile["points"])
-        self.status_row.set_title(title)
-        self.status_row.set_subtitle(f"{n} 个按键点 · 焦点 {st.get('focus') or '-'} · "
-                                     f"{st.get('keyboards', 0)} 个键盘 · {self.backend.label} · "
-                                     f"{st.get('priority', '?')}")
-        self.status_icon.set_from_icon_name(icon)
+            text = "等待匹配的窗口获得焦点"
+        self.enable_row.set_subtitle(text)
 
     # ================================================================ HUD / editor
-    def _on_hud_setting(self, *_):
-        self.settings["hud"] = self.hud_row.get_active()
-        self.settings["hud_opacity"] = round(self.opacity.get_value(), 2)
-        prof.save_settings(self.settings)
-        self.update_hud()
-
     def rebuild_hud(self):
         if self.editor:
             return
@@ -596,6 +742,7 @@ class Key2Touch(Adw.Application):
             return
         if self.hud:
             self.hud.close()
+            self.hud = None
         if not self.layer_shell:
             return  # HUD needs wlr-layer-shell (not available on e.g. GNOME)
         self.hud = Overlay(self, edit=False)
@@ -605,7 +752,7 @@ class Key2Touch(Adw.Application):
     def update_hud(self):
         if self.hud:
             # Shown whenever mapping is on; dimmed while waiting for the game window.
-            self.hud.set_hud_visible(self.hud_row.get_active() and self.engine_state.get("enabled", True),
+            self.hud.set_hud_visible(self.settings.get("hud", True) and self.engine_state.get("enabled", True),
                                      dim=not self.engine_state.get("active", False))
 
     def on_edit(self, *_):
@@ -625,7 +772,7 @@ class Key2Touch(Adw.Application):
         self.editor = None
         if not save:
             self.profile = backup
-        self.engine.send(cmd="enable", on=self.enable_sw.get_active())
+        self.engine.send(cmd="enable", on=self.enable_row.get_active())
         self.load_into_ui()
         if save:
             self.toast(f"已保存「{self.name}」")
