@@ -48,6 +48,16 @@ def new_joystick(x, y, r=0.12):
     }
 
 
+def new_look(x, y, r=0.22):
+    """Camera area: mouse motion drags a virtual finger around (x, y).
+
+    r: how far the finger may wander (fraction of output height) before it
+    is lifted and put back at the centre; sens: touch distance per mouse
+    count (1.0 = 0.0005 of the output height); cursor_key: held to get the
+    mouse cursor back."""
+    return {"type": "look", "x": x, "y": y, "r": r, "sens": 1.0, "cursor_key": "KEY_LEFTALT"}
+
+
 def normalize(p):
     out = dict(DEFAULT_PROFILE)
     out.update(p or {})

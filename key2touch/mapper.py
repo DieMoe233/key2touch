@@ -86,12 +86,66 @@ class Joystick:
             self.slot = None
 
 
+LOOK_SCALE = 0.0005  # touch movement (fraction of output height) per mouse count at sens 1.0
+LOOK_IDLE = 0.3  # seconds without mouse motion before the camera finger lifts
+
+
+class Look:
+    """Mouse motion → a dragging finger, re-centred at the edge of its area."""
+
+    def __init__(self, touch, pt, aspect):
+        self.touch, self.cx, self.cy = touch, pt["x"], pt["y"]
+        self.r = pt.get("r", 0.22)
+        self.k = pt.get("sens", 1.0) * LOOK_SCALE
+        self.aspect = aspect
+        self.slot = None
+        self.ox = self.oy = 0.0  # finger offset from the centre, in height units
+        self.last = 0.0
+
+    def motion(self, dx, dy, now):
+        """dx, dy: mouse counts accumulated over one read batch."""
+        if not dx and not dy:
+            return
+        self.last = now
+        mx, my = dx * self.k, dy * self.k
+        if self.slot is not None and (self.ox + mx) ** 2 + (self.oy + my) ** 2 > self.r ** 2:
+            self.release()  # about to leave the area: lift, and start over at the centre
+        if self.slot is None:
+            self.ox = self.oy = 0.0
+            self.slot = self.touch.down(self.cx, self.cy)
+            if self.slot is None:
+                return
+        self.ox = max(-self.r, min(self.r, self.ox + mx))
+        self.oy = max(-self.r, min(self.r, self.oy + my))
+        self.touch.move(self.slot, self.cx + self.ox / self.aspect, self.cy + self.oy)
+
+    def idle(self, now):
+        if self.slot is not None and now - self.last >= LOOK_IDLE:
+            self.release()
+
+    def deadline(self):
+        return self.last + LOOK_IDLE if self.slot is not None else None
+
+    def release(self):
+        if self.slot is not None:
+            self.touch.up(self.slot)
+            self.slot = None
+
+
 class Mapper:
     def __init__(self, touch, profile, aspect=16 / 9):
         self.controls = []
         self.bindings = {}  # keycode -> [(mods frozenset, control index)]
+        self.look = None
+        self.cursor_key = None
         for i, pt in enumerate(profile.get("points", [])):
-            if pt.get("type") == "joystick":
+            if pt.get("type") == "look":
+                c = Look(touch, pt, aspect)
+                binds = []
+                if self.look is None:  # one camera area per profile
+                    self.look = c
+                    self.cursor_key = keycode(pt.get("cursor_key"))
+            elif pt.get("type") == "joystick":
                 c = Joystick(touch, pt, aspect)
                 binds = [(code, frozenset()) for code in c.dirs]
             else:

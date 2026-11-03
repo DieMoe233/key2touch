@@ -68,6 +68,14 @@ def is_keyboard(dev):
     return e.KEY_A in keys and e.KEY_SPACE in keys
 
 
+def is_mouse(dev):
+    if dev.name.startswith(OWN_PREFIX) or is_keyboard(dev):
+        return False
+    caps = dev.capabilities()
+    rel, keys = caps.get(e.EV_REL, []), caps.get(e.EV_KEY, [])
+    return e.REL_X in rel and e.REL_Y in rel and e.BTN_LEFT in keys
+
+
 def grabbable(dev):
     """Combo devices (keyboard + touchpad/mouse on one node, e.g. Logitech
     K400) are read but never grabbed: we only re-inject keys, so grabbing
@@ -83,6 +91,10 @@ class Engine:
         self.pass_down = {}  # fd -> keycodes currently held via the passthrough device
         self.dev_down = {}  # fd -> every keycode currently held on that device
         self.kbds = {}  # fd -> InputDevice
+        self.mice = {}  # fd -> InputDevice; grabbed only while camera mode is on
+        self.mice_grabbed = set()
+        self.want_mouse_grab = False
+        self.cursor_held = False  # the look point's cursor key (default Alt) is down
         self.paths = set()
         self.want_grab = False
         self.grabbed_fds = set()
@@ -110,7 +122,8 @@ class Engine:
 
     def emit_state(self):
         self.emit(ev="state", active=self.active, enabled=self.enabled,
-                  focus=self.focus_app, keyboards=len(self.kbds),
+                  focus=self.focus_app, keyboards=len(self.kbds), mice=len(self.mice),
+                  look=self.want_mouse_grab,
                   priority=self.priority, desktop=self.backend.name,
                   focus_tracking=self.focus_src is not None)
 
@@ -126,6 +139,11 @@ class Engine:
                 dev = evdev.InputDevice(path)
             except OSError:
                 continue
+            if is_mouse(dev):
+                self.mice[dev.fd] = dev
+                if self.want_mouse_grab:
+                    self.try_grab_mouse(dev)
+                continue
             if not is_keyboard(dev):
                 dev.close()
                 continue
@@ -135,13 +153,14 @@ class Engine:
             self.emit_state()
         for path in self.paths - nodes:
             self.paths.discard(path)
-            for fd, dev in list(self.kbds.items()):
+            for fd, dev in list(self.kbds.items()) + list(self.mice.items()):
                 if dev.path == path:
                     self.drop(fd)
 
     def drop(self, fd):
-        dev = self.kbds.pop(fd, None)
+        dev = self.kbds.pop(fd, None) or self.mice.pop(fd, None)
         self.grabbed_fds.discard(fd)
+        self.mice_grabbed.discard(fd)
         # An unplugged keyboard never sends its releases: lift everything it
         # was holding, or keys autorepeat / fingers stay down in the game.
         held = self.pass_down.pop(fd, set())
@@ -208,6 +227,80 @@ class Engine:
             self.passthru.syn()
         self.pass_down.clear()
 
+    # ---- mice / camera mode ----
+    def try_grab_mouse(self, dev):
+        # Same rule as keyboards: never grab with a button held, or its
+        # release is swallowed and the button sticks in the compositor.
+        if dev.fd in self.mice_grabbed:
+            return
+        try:
+            if dev.active_keys():
+                return
+            dev.grab()
+            if dev.active_keys():
+                dev.ungrab()
+                return
+            self.mice_grabbed.add(dev.fd)
+        except OSError:
+            pass
+
+    def update_look(self):
+        """Camera mode = mapping active + a look point + cursor key not held.
+        While on, mice are grabbed: motion drives the camera, buttons can be
+        bound like keys, the cursor stays put."""
+        want = bool(self.active and self.mapper.look and not self.cursor_held)
+        if want == self.want_mouse_grab:
+            return
+        self.want_mouse_grab = want
+        if want:
+            for dev in self.mice.values():
+                self.try_grab_mouse(dev)
+        else:
+            self.mapper.look and self.mapper.look.release()
+            for code in [c for c in self.mapper.fired if e.BTN_MISC <= c < e.KEY_OK]:
+                idx = self.mapper.key(code, 0)  # mouse-button taps
+                if idx is not None:
+                    self.emit(ev="key", code=code, idx=idx, down=False)
+            for fd in self.mice_grabbed:
+                try:
+                    self.mice[fd].ungrab()
+                except (OSError, KeyError):
+                    pass
+            self.mice_grabbed.clear()
+        self.emit_state()
+
+    def on_mouse_events(self, dev):
+        try:
+            events = list(dev.read())
+        except BlockingIOError:
+            return
+        except OSError:
+            self.drop(dev.fd)
+            return
+        if dev.fd not in self.mice_grabbed:
+            # Not ours right now: the compositor gets these events anyway.
+            if self.want_mouse_grab:
+                self.try_grab_mouse(dev)
+            return
+        dx = dy = 0
+        for ev in events:
+            if ev.type == e.EV_REL:
+                if ev.code == e.REL_X:
+                    dx += ev.value
+                elif ev.code == e.REL_Y:
+                    dy += ev.value
+            elif ev.type == e.EV_KEY and ev.value != 2:
+                if ev.value == 1:
+                    self.dev_down.setdefault(dev.fd, set()).add(ev.code)
+                else:
+                    self.dev_down.get(dev.fd, set()).discard(ev.code)
+                idx = self.mapper.key(ev.code, ev.value)  # unbound buttons are dropped
+                if idx is not None:
+                    self.emit(ev="key", code=ev.code, idx=idx, down=ev.value == 1)
+        # One touch move per read batch, however fast the mouse polls.
+        if self.mapper.look:
+            self.mapper.look.motion(dx, dy, time.monotonic())
+
     # ---- state ----
     def update_active(self):
         focus_ok = True
@@ -220,6 +313,7 @@ class Engine:
             if not active:
                 self.mapper.release_all()
         self.set_grab(self.active and self.profile.get("grab", True))
+        self.update_look()
         self.emit_state()
 
     def set_profile(self, prof, aspect):
@@ -271,6 +365,12 @@ class Engine:
                 if val == 0:
                     self.hotkey_down.discard(code)
                 continue
+            if code == self.mapper.cursor_key:
+                # Held: show the mouse cursor (leave camera mode) — like Alt in PC games.
+                self.cursor_held = val != 0
+                self.update_look()
+                if self.active:
+                    continue
             action = self.match_hotkey(code) if val == 1 else None
             if action:
                 self.hotkey_down.add(code)
@@ -353,10 +453,14 @@ class Engine:
         last_scan = time.monotonic()
         try:
             while True:
-                fds = [0, *self.kbds]
+                fds = [0, *self.kbds, *self.mice]
                 if self.focus_src:
                     fds.append(self.focus_src.fileno())
-                ready, _, _ = select.select(fds, [], [], 1.0)
+                timeout = 1.0
+                look = self.mapper.look
+                if look and look.deadline() is not None:
+                    timeout = max(0.0, min(timeout, look.deadline() - time.monotonic()))
+                ready, _, _ = select.select(fds, [], [], timeout)
                 for fd in ready:
                     if fd == 0:
                         self.on_stdin()
@@ -364,6 +468,10 @@ class Engine:
                         self.on_focus()
                     elif fd in self.kbds:
                         self.on_key_events(self.kbds[fd])
+                    elif fd in self.mice:
+                        self.on_mouse_events(self.mice[fd])
+                if self.mapper.look:
+                    self.mapper.look.idle(time.monotonic())
                 now = time.monotonic()
                 if now - last_scan >= 1.0:
                     last_scan = now
@@ -371,6 +479,8 @@ class Engine:
                     if not ready:
                         gc.collect(0)
         finally:
+            self.active = False
+            self.update_look()  # ungrabs the mice
             self.mapper.release_all()
             self.set_grab(False)
             self.touch.close()

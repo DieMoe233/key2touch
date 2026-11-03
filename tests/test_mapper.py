@@ -159,3 +159,38 @@ class WindowRuleTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LookTests(unittest.TestCase):
+    def setUp(self):
+        from key2touch.profile import new_look
+        self.t = FakeTouch()
+        pt = new_look(0.6, 0.4, r=0.1)
+        pt["sens"] = 2.0  # 0.001 of the height per count
+        self.m = Mapper(self.t, {"points": [pt]}, aspect=2.0)
+        self.look = self.m.look
+
+    def test_drag_from_centre(self):
+        self.look.motion(20, -10, now=1.0)
+        self.assertEqual(self.t.log[0], ("down", 0, 0.6, 0.4))
+        # 20 counts * 0.001 = 0.02 height = 0.01 width at aspect 2
+        self.assertEqual(self.t.log[1], ("move", 0, 0.61, 0.39))
+
+    def test_recentre_at_edge(self):
+        self.look.motion(90, 0, now=1.0)
+        self.look.motion(30, 0, now=1.01)  # would pass r=0.1: lift, start again at the centre
+        self.assertEqual([l[0] for l in self.t.log], ["down", "move", "up", "down", "move"])
+        self.assertEqual(self.t.log[-1], ("move", 1, 0.615, 0.4))
+
+    def test_idle_lift(self):
+        self.look.motion(5, 5, now=1.0)
+        self.look.idle(now=1.1)
+        self.assertEqual(self.t.live, {0})
+        self.look.idle(now=1.5)
+        self.assertEqual(self.t.live, set())
+
+    def test_mouse_button_binding(self):
+        from key2touch.profile import new_tap
+        m = Mapper(self.t, {"points": [new_tap(0.8, 0.8, "BTN_LEFT")]})
+        self.assertEqual(m.key(e.BTN_LEFT, 1), 0)
+        self.assertEqual(m.key(e.BTN_LEFT, 0), 0)

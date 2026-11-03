@@ -17,14 +17,18 @@ from gi.repository import Gdk, GLib, Gtk, Gtk4LayerShell as LS  # noqa: E402
 from evdev import ecodes as e  # noqa: E402
 
 from .mapper import MOD_GROUP, MOD_ORDER  # noqa: E402
-from .profile import JOY_DIRS, TAP_R, new_joystick, new_tap  # noqa: E402
+from .profile import JOY_DIRS, TAP_R, new_joystick, new_look, new_tap  # noqa: E402
 
 ARROWS = {"KEY_UP": "↑", "KEY_DOWN": "↓", "KEY_LEFT": "←", "KEY_RIGHT": "→", "KEY_SPACE": "Space"}
 DIR_ANGLE = {"up": -90, "right": 0, "down": 90, "left": 180}
 DIR_ARROW = {"up": "↑", "left": "←", "down": "↓", "right": "→"}
 MOD_NAME_GROUP = {e.KEY[c]: g for c, g in MOD_GROUP.items()}
 MOD_LABEL = {"CTRL": "Ctrl", "ALT": "Alt", "SHIFT": "Shift", "META": "Super"}
-SIZE_RANGE = {"tap": (0.008, 0.1), "joystick": (0.03, 0.45)}
+SIZE_RANGE = {"tap": (0.008, 0.1), "joystick": (0.03, 0.45), "look": (0.05, 0.45)}
+MOUSE_LABELS = {"BTN_LEFT": "左键", "BTN_RIGHT": "右键", "BTN_MIDDLE": "中键",
+                "BTN_SIDE": "侧键1", "BTN_EXTRA": "侧键2"}
+# GDK button number -> evdev code, for binding mouse buttons by clicking.
+GDK_BUTTONS = {1: "BTN_LEFT", 2: "BTN_MIDDLE", 3: "BTN_RIGHT", 8: "BTN_SIDE", 9: "BTN_EXTRA"}
 WASD = {"up": "KEY_W", "left": "KEY_A", "down": "KEY_S", "right": "KEY_D"}
 
 
@@ -33,10 +37,12 @@ def key_label(name):
         return "?"
     if name in ARROWS:
         return ARROWS[name]
+    if name in MOUSE_LABELS:
+        return MOUSE_LABELS[name]
     s = name.removeprefix("KEY_")
     for a, b in (("LEFT", "L"), ("RIGHT", "R")):
         if s.startswith(a) and len(s) > len(a):
-            s = b + s[len(a):]
+            return b + s[len(a):].capitalize()  # LShift, RAlt
     return s.capitalize() if len(s) > 1 else s
 
 
@@ -168,6 +174,9 @@ class Overlay(Gtk.Window):
         ov.add_overlay(self.toast)
         self.set_child(ov)
 
+        mclick = Gtk.GestureClick(button=0, propagation_phase=Gtk.PropagationPhase.CAPTURE)
+        mclick.connect("pressed", self._mouse_bind)
+        self.area.add_controller(mclick)
         drag = Gtk.GestureDrag(button=1)
         drag.connect("drag-begin", self._drag_begin)
         drag.connect("drag-update", self._drag_update)
@@ -230,6 +239,9 @@ class Overlay(Gtk.Window):
         joy = Gtk.Button(label="＋ 摇杆")
         joy.connect("clicked", self.add_joystick)
         bar.append(joy)
+        look = Gtk.Button(label="＋ 视角", tooltip_text="用鼠标拖动视角（每个配置一个）")
+        look.connect("clicked", self.add_look)
+        bar.append(look)
 
         cbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, margin_top=8,
                        margin_bottom=8, margin_start=8, margin_end=8)
@@ -306,9 +318,12 @@ class Overlay(Gtk.Window):
         # Keep the panel on the side away from the point.
         self.panel.set_halign(Gtk.Align.START if p["x"] > 0.55 else Gtk.Align.END)
 
-        title = Gtk.Label(label="摇杆" if p["type"] == "joystick" else "按键点", xalign=0)
+        title = Gtk.Label(label={"joystick": "摇杆", "look": "视角"}.get(p["type"], "按键点"), xalign=0)
         title.add_css_class("title-3")
         self.panel.append(title)
+        if p["type"] == "look":
+            self._look_panel(p)
+            return
 
         kind = Gtk.Box(homogeneous=True)
         kind.add_css_class("linked")
@@ -346,7 +361,29 @@ class Overlay(Gtk.Window):
             seq.connect("clicked", lambda *_: self.start_binding(self.sel, JOY_DIRS[0], seq=True))
             self.panel.append(seq)
 
-        self.panel.append(self._caption("大小（也可在画面上滚动滚轮）"))
+        self._size_and_footer(p)
+
+    def _look_panel(self, p):
+        self.panel.append(self._caption("游戏里移动鼠标即拖动视角；松开一会儿手指会抬起"))
+        self.panel.append(self._caption("按住此键显示鼠标（点界面用）"))
+        binding = self.binding is not None and self.binding[0] == self.sel
+        b = Gtk.Button(label="按下按键…" if binding else key_label(p.get("cursor_key")))
+        if binding:
+            b.add_css_class("suggested-action")
+        b.connect("clicked", lambda *_: self.start_binding(self.sel, "cursor"))
+        self.panel.append(b)
+        self.panel.append(self._caption("灵敏度"))
+        sens = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0.2, 5.0, 0.05)
+        sens.set_value(p.get("sens", 1.0))
+        sens.add_mark(1.0, Gtk.PositionType.BOTTOM, None)
+        sens.set_draw_value(True)
+        sens.set_digits(2)
+        sens.connect("value-changed", lambda sc: p.__setitem__("sens", round(sc.get_value(), 2)))
+        self.panel.append(sens)
+        self._size_and_footer(p, "活动范围（手指移出范围会回到中心重新按下）")
+
+    def _size_and_footer(self, p, size_caption="大小（也可在画面上滚动滚轮）"):
+        self.panel.append(self._caption(size_caption))
         lo, hi = SIZE_RANGE[p["type"]]
         self.size_scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, lo, hi, (hi - lo) / 200)
         self.size_scale.set_draw_value(False)
@@ -459,9 +496,10 @@ class Overlay(Gtk.Window):
         if self.drag_orig is not None and self.sel is not None:
             if math.hypot(dx, dy) < 4:
                 # Click without movement: rebind.
-                if self.points[self.sel]["type"] == "joystick":
+                kind = self.points[self.sel]["type"]
+                if kind == "joystick":
                     self.start_binding(self.sel, JOY_DIRS[0], seq=True)
-                else:
+                elif kind == "tap":
                     self.start_binding(self.sel, None)
             else:
                 self.refresh_panel()  # panel may need to change sides
@@ -530,6 +568,14 @@ class Overlay(Gtk.Window):
     def _bind(self, name, mods):
         i, d, seq = self.binding
         p = self.points[i]
+        if d == "cursor":
+            p["cursor_key"] = name
+            self.binding = None
+            self.mods_held.clear()
+            self.mod_solo = False
+            self.refresh_panel()
+            self.area.queue_draw()
+            return
         if d is not None:
             mods = []  # joystick directions are single keys
         self._steal(name, mods, p)
@@ -601,6 +647,28 @@ class Overlay(Gtk.Window):
         if name in self.mods_held:
             self.mods_held.remove(name)
 
+    def add_look(self, *_):
+        self.cancel_binding()
+        existing = next((i for i, p in enumerate(self.points) if p["type"] == "look"), None)
+        if existing is not None:
+            self.select(existing)
+            self.show_toast("每个配置只有一个视角区域")
+            return
+        self.points.append(new_look(0.62, 0.42))
+        self.select(len(self.points) - 1)
+        if not self.app.profile.get("only_focused"):
+            self.show_toast("提示：视角会占用鼠标。建议在高级设置里开启「仅聚焦指定软件窗口时生效」")
+
+    def _mouse_bind(self, g, n, x, y):
+        """While binding a tap, a click binds that mouse button (attack on LMB...)."""
+        if not self.binding or self.binding[1] is not None:
+            return
+        name = GDK_BUTTONS.get(g.get_current_button())
+        if not name:
+            return
+        g.set_state(Gtk.EventSequenceState.CLAIMED)  # don't also start a drag / delete
+        self._bind(name, {MOD_NAME_GROUP[m] for m in self.mods_held})
+
     def add_joystick(self, *_):
         self.cancel_binding()
         p = new_joystick(0.18, 0.72)
@@ -633,7 +701,9 @@ class Overlay(Gtk.Window):
         for i, p in enumerate(self.points):
             selected = self.edit and i == self.sel
             bind = self.binding if self.binding and self.binding[0] == i else None
-            if p["type"] == "joystick":
+            if p["type"] == "look":
+                self._draw_look(cr, p, w, h, alpha, selected, bind is not None)
+            elif p["type"] == "joystick":
                 self._draw_joy(cr, p, w, h, alpha, selected, bind[1] if bind else None)
             else:
                 self._draw_tap(cr, p, w, h, alpha, selected, bind is not None, i in self.pressed_idx)
@@ -684,7 +754,7 @@ class Overlay(Gtk.Window):
         size = clamp(min(r * 0.8, 2.6 * r / max(len(text), 1)), 9, 30)
         self._label(cr, x, y, text, size, (1, 1, 1, max(a, 0.35)))
         if binding:
-            self._hint(cr, x, y - r - 24, "按下要绑定的键，可配合 Ctrl/Alt/Shift（Esc 取消）")
+            self._hint(cr, x, y - r - 24, "按下要绑定的键或鼠标按键，可配合 Ctrl/Alt/Shift（Esc 取消）")
 
     def _draw_joy(self, cr, p, w, h, a, selected, bind_dir):
         x, y, r = p["x"] * w, p["y"] * h, p["r"] * h
@@ -716,6 +786,28 @@ class Overlay(Gtk.Window):
         if bind_dir:
             names = {"up": "上", "left": "左", "down": "下", "right": "右"}
             self._hint(cr, x, y - r - 24, f"按下「{names[bind_dir]}」方向的键（Esc 停止）")
+
+    def _draw_look(self, cr, p, w, h, a, selected, binding):
+        x, y, r = p["x"] * w, p["y"] * h, p["r"] * h
+        cr.new_path()
+        cr.set_dash([10, 8])
+        cr.arc(x, y, r, 0, 2 * math.pi)
+        cr.set_source_rgba(0.08, 0.08, 0.1, 0.2 * a)
+        cr.fill_preserve()
+        cr.set_line_width(3 if selected else 2)
+        cr.set_source_rgba(*((0.35, 0.7, 1, 1) if selected else (1, 1, 1, 0.6 * a)))
+        cr.stroke()
+        cr.set_dash([])
+        # crosshair
+        cr.set_line_width(2)
+        cr.set_source_rgba(1, 1, 1, 0.8 * a)
+        for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            cr.move_to(x + dx * 8, y + dy * 8)
+            cr.line_to(x + dx * 22, y + dy * 22)
+        cr.stroke()
+        self._label(cr, x, y + 40, "视角", 16, (1, 1, 1, max(a, 0.35)))
+        hint = "按下按键…" if binding else f"按住 {key_label(p.get('cursor_key'))} 显示鼠标"
+        self._label(cr, x, y + 62, hint, 12, (1, 0.82, 0.35, 1) if binding else (1, 1, 1, max(a * 0.8, 0.3)))
 
     def _draw_help(self, cr, w, h):
         text = ("左键空白处 添加按键  ·  点击按键 重新绑定  ·  拖动 移动  ·  滚轮 调整大小  ·  "

@@ -28,6 +28,11 @@ KEY_ALIASES = {"LSHIFT": "LEFTSHIFT", "RSHIFT": "RIGHTSHIFT", "LCTRL": "LEFTCTRL
                "LALT": "LEFTALT", "RALT": "RIGHTALT", "LSUPER": "LEFTMETA", "RSUPER": "RIGHTMETA",
                "ESCAPE": "ESC", "RETURN": "ENTER", "DEL": "DELETE", "BACKSPACE": "BACKSPACE",
                "PGUP": "PAGEUP", "PGDN": "PAGEDOWN", "CAPS": "CAPSLOCK"}
+MOUSE_ALIASES = {"LMB": "BTN_LEFT", "MOUSE1": "BTN_LEFT", "MOUSE_LEFT": "BTN_LEFT", "BTN_LEFT": "BTN_LEFT",
+                 "RMB": "BTN_RIGHT", "MOUSE2": "BTN_RIGHT", "MOUSE_RIGHT": "BTN_RIGHT", "BTN_RIGHT": "BTN_RIGHT",
+                 "MMB": "BTN_MIDDLE", "MOUSE3": "BTN_MIDDLE", "MOUSE_MIDDLE": "BTN_MIDDLE", "BTN_MIDDLE": "BTN_MIDDLE",
+                 "MOUSE4": "BTN_SIDE", "BTN_SIDE": "BTN_SIDE", "MOUSE5": "BTN_EXTRA", "BTN_EXTRA": "BTN_EXTRA"}
+_MOUSE_SPEC = {"BTN_LEFT": "lmb", "BTN_RIGHT": "rmb", "BTN_MIDDLE": "mmb", "BTN_SIDE": "mouse4", "BTN_EXTRA": "mouse5"}
 
 COMMANDS = {"on", "off", "toggle", "status", "edit", "show", "quit", "profiles", "profile",
             "point", "set", "window", "outputs", "windows", "check", "agent-help"}
@@ -64,6 +69,15 @@ missing permissions, compositor setup. Run it after every change.
 ## Keys
 Case-insensitive names: `j`, `space`, `enter`, `esc`, `f1`, `up`, `lshift`,
 `kp1` ... Combos join modifiers with `+`: `ctrl+q`, `alt+shift+1`.
+Mouse buttons: `lmb`, `rmb`, `mmb`, `mouse4`, `mouse5` (they only act while
+the camera area is in use, i.e. when the profile has a `look` point).
+
+## Camera (games like Genshin)
+`point add look X Y` adds a camera area: while mapping is active the mouse
+is captured and its motion drags a virtual finger from (X, Y); `--sens`
+scales it (default 1.0), `--size` is how far the finger may travel before
+it is re-centred. Holding the cursor key (default `lalt`) frees the mouse.
+Put it on an empty part of the screen, away from buttons.
 
 ## Typical session
     key2touch windows --json                 # which display is the game on?
@@ -71,6 +85,8 @@ Case-insensitive names: `j`, `space`, `enter`, `esc`, `f1`, `up`, `lshift`,
     key2touch set output DP-2 -p genshin
     key2touch point add tap j 85% 78% -p genshin
     key2touch point add stick 15% 70% --keys w,a,s,d --size 0.13 -p genshin
+    key2touch point add look 60% 40% --sens 1.2 -p genshin
+    key2touch point add tap lmb 85% 78% -p genshin --replace
     key2touch point list -p genshin --json
     key2touch check -p genshin --json        # fix every error it reports
     key2touch set only-focused true -p genshin
@@ -172,6 +188,8 @@ def parse_key(text):
         if not g:
             raise CliError(f"未知的修饰键：{m!r}（可用 ctrl / alt / shift / super）", EXIT_USAGE)
         groups.append(g)
+    if key.upper() in MOUSE_ALIASES:
+        return MOUSE_ALIASES[key.upper()], [g for g in MOD_ORDER if g in groups]
     k = key.upper().removeprefix("KEY_")
     k = KEY_ALIASES.get(k, k)
     name = f"KEY_{k}"
@@ -187,6 +205,8 @@ _MOD_SPEC = {"CTRL": "ctrl", "ALT": "alt", "SHIFT": "shift", "META": "super"}
 
 def fmt_key(name, mods=()):
     """Inverse of parse_key: 'KEY_Q', ['CTRL'] -> 'ctrl+q' (round-trips)."""
+    if name in _MOUSE_SPEC:
+        return "+".join([_MOD_SPEC[m] for m in MOD_ORDER if m in (mods or ())] + [_MOUSE_SPEC[name]])
     k = name.removeprefix("KEY_")
     k = _REVERSE_ALIASES.get(k, k.lower())
     return "+".join([_MOD_SPEC[m] for m in MOD_ORDER if m in (mods or ())] + [k])
@@ -229,6 +249,10 @@ def target_profile(args):
 
 
 def describe_point(i, p):
+    if p["type"] == "look":
+        return {"index": i, "type": "look", "x": round(p["x"], 4), "y": round(p["y"], 4),
+                "size": round(p.get("r", 0.22), 4), "sens": p.get("sens", 1.0),
+                "cursor_key": fmt_key(p["cursor_key"]) if p.get("cursor_key") else None}
     if p["type"] == "joystick":
         keys = {d: (fmt_key(p["keys"][d]) if p["keys"].get(d) else None) for d in JOY_DIRS}
         return {"index": i, "type": "joystick", "x": round(p["x"], 4), "y": round(p["y"], 4),
@@ -365,6 +389,9 @@ def cmd_profile(args, out):
 
 
 def _point_line(d):
+    if d["type"] == "look":
+        return (f"  [{d['index']}] 视角  ({d['x']:.3f}, {d['y']:.3f})  size {d['size']}  "
+                f"sens {d['sens']}  按住 {d['cursor_key']} 显示鼠标")
     if d["type"] == "joystick":
         keys = "/".join(d["keys"][k] or "?" for k in JOY_DIRS)
         return f"  [{d['index']}] 摇杆 {keys}  ({d['x']:.3f}, {d['y']:.3f})  size {d['size']}"
@@ -430,6 +457,12 @@ def cmd_point(args, out):
             key, mods = parse_key(args.key)
             pt = prof.new_tap(x, y, key, r=args.size or prof.TAP_R)
             pt["mods"] = mods
+        elif args.kind == "look":
+            pt = prof.new_look(x, y, r=args.size or 0.22)
+            if args.sens is not None:
+                pt["sens"] = args.sens
+            if args.cursor_key:
+                pt["cursor_key"] = parse_key(args.cursor_key)[0]
         else:
             keys = [k.strip() for k in (args.keys or "w,a,s,d").split(",")]
             if len(keys) != 4:
@@ -438,7 +471,11 @@ def cmd_point(args, out):
             pt["keys"] = {d: parse_key(k)[0] for d, k in zip(JOY_DIRS, keys)}
 
         def add(p):
+            if pt["type"] == "look" and any(q["type"] == "look" for q in p["points"]):
+                raise CliError("这个配置已经有视角区域了（每个配置一个；用 point set 修改）")
             p["points"].append(pt)
+            if pt["type"] == "look":
+                return len(p["points"]) - 1
             if pt["type"] == "tap":
                 _bind(p["points"], pt["key"], pt["mods"], pt, args.replace)
             else:
@@ -461,6 +498,14 @@ def cmd_point(args, out):
                 q["y"] = parse_coord(args.y)
             if args.size is not None:
                 q["r"] = args.size
+            if args.sens is not None:
+                if q["type"] != "look":
+                    raise CliError("--sens 只适用于视角区域", EXIT_USAGE)
+                q["sens"] = args.sens
+            if args.cursor_key is not None:
+                if q["type"] != "look":
+                    raise CliError("--cursor-key 只适用于视角区域", EXIT_USAGE)
+                q["cursor_key"] = parse_key(args.cursor_key)[0]
             if args.key is not None:
                 if q["type"] != "tap":
                     raise CliError("摇杆请用 --keys 上,左,下,右", EXIT_USAGE)
@@ -621,6 +666,10 @@ def check_profile(name, p, b):
             add("warning", "no_matching_window", "没有打开的窗口匹配窗口规则（游戏还没开？）")
 
     pts = p["points"]
+    if any(q["type"] == "look" for q in pts) and not (p.get("only_focused") and b.supports_focus):
+        add("warning", "look_without_focus",
+            "有视角区域时鼠标会被占用：建议开启仅聚焦指定窗口时生效（set only-focused true），"
+            "否则切到别的窗口鼠标仍被占用，只能按住显示鼠标的键或用开关热键")
     if not pts:
         add("warning", "no_points", "没有按键点")
     for i, q in enumerate(pts):
@@ -631,6 +680,8 @@ def check_profile(name, p, b):
         rx = r / aspect
         if q["x"] - rx < 0 or q["x"] + rx > 1 or q["y"] - r < 0 or q["y"] + r > 1:
             add("warning", "partly_offscreen", f"第 {i} 个按键点的范围超出了屏幕边缘", point=i)
+        if q["type"] == "look":
+            continue
         if q["type"] == "tap" and not q.get("key"):
             add("warning", "unbound", f"第 {i} 个按键点没有绑定按键", point=i)
         if q["type"] == "joystick" and not all(q["keys"].get(d) for d in JOY_DIRS):
@@ -643,6 +694,8 @@ def check_profile(name, p, b):
             dist = (((a["x"] - c["x"]) * aspect) ** 2 + (a["y"] - c["y"]) ** 2) ** 0.5
             if dist < ra + rc:
                 kind = "inside" if dist < max(ra, rc) else "overlap"
+                if "look" in (a["type"], c["type"]):
+                    continue  # buttons inside the camera area are normal; touches don't collide
                 add("warning", f"points_{kind}",
                     f"第 {i} 和第 {j} 个按键点" + ("一个的中心落在另一个范围内" if kind == "inside" else "范围重叠"),
                     points=[i, j])
@@ -721,6 +774,12 @@ def build_parser():
     a.add_argument("y", help="纵坐标，0..1 或百分比")
     a.add_argument("--size", type=float, help="半径，占显示器高度的比例（默认 0.025）")
     a.add_argument("--replace", action="store_true", help="按键已被别的按键点使用时，改绑到这里")
+    a = add.add_parser("look", help="视角区域（鼠标拖动视角）：X Y", parents=[common, target])
+    a.add_argument("x")
+    a.add_argument("y")
+    a.add_argument("--size", type=float, help="活动范围半径，占显示器高度的比例（默认 0.22）")
+    a.add_argument("--sens", type=float, help="灵敏度（默认 1.0）")
+    a.add_argument("--cursor-key", help="按住显示鼠标的键（默认 lalt）")
     a = add.add_parser("stick", help="摇杆：X Y", parents=[common, target])
     a.add_argument("x")
     a.add_argument("y")
@@ -734,6 +793,8 @@ def build_parser():
     p.add_argument("--size", type=float)
     p.add_argument("--key", help="点击类按键点的按键")
     p.add_argument("--keys", help="摇杆的 上,左,下,右")
+    p.add_argument("--sens", type=float, help="视角灵敏度")
+    p.add_argument("--cursor-key", help="视角：按住显示鼠标的键")
     p.add_argument("--replace", action="store_true", help="按键已被别的按键点使用时，改绑到这里")
     p = pt.add_parser("rm", help="删除按键点", parents=[common, target])
     p.add_argument("index", type=int, nargs="+")
