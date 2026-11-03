@@ -68,11 +68,19 @@ def is_keyboard(dev):
     return e.KEY_A in keys and e.KEY_SPACE in keys
 
 
+def grabbable(dev):
+    """Combo devices (keyboard + touchpad/mouse on one node, e.g. Logitech
+    K400) are read but never grabbed: we only re-inject keys, so grabbing
+    them would freeze their pointer."""
+    caps = dev.capabilities()
+    return e.EV_REL not in caps and e.EV_ABS not in caps
+
+
 class Engine:
     def __init__(self):
         self.touch = TouchScreen()
         self.passthru = None  # virtual keyboard, created on first grab
-        self.pass_down = set()
+        self.pass_down = {}  # fd -> keycodes currently held via the passthrough device
         self.kbds = {}  # fd -> InputDevice
         self.paths = set()
         self.want_grab = False
@@ -133,6 +141,16 @@ class Engine:
     def drop(self, fd):
         dev = self.kbds.pop(fd, None)
         self.grabbed_fds.discard(fd)
+        # An unplugged keyboard never sends its releases: lift everything it
+        # was holding, or keys autorepeat / fingers stay down in the game.
+        held = self.pass_down.pop(fd, set())
+        for code in held:
+            self.passthru.write(e.EV_KEY, code, 0)
+        if held:
+            self.passthru.syn()
+        self.mapper.release_all()
+        self.mapper.mods_down.clear()
+        self.toggle_down = False
         if dev:
             try:
                 dev.close()
@@ -143,12 +161,17 @@ class Engine:
     def try_grab(self, dev):
         # Only grab while no key is held on this device: a key pressed before
         # the grab would have its release swallowed and get stuck in niri.
-        if dev.fd in self.grabbed_fds:
+        if dev.fd in self.grabbed_fds or not grabbable(dev):
             return
         try:
             if dev.active_keys():
                 return
             dev.grab()
+            if dev.active_keys():
+                # A key went down between the check and the grab; its press
+                # reached the compositor, so its release must too. Retry later.
+                dev.ungrab()
+                return
             self.grabbed_fds.add(dev.fd)
         except OSError:
             pass
@@ -172,9 +195,10 @@ class Engine:
         # Keys pressed through the passthrough device would otherwise stay
         # stuck: their real release now goes to libinput, which never saw
         # the press.
-        for code in self.pass_down:
+        held = set().union(*self.pass_down.values()) if self.pass_down else set()
+        for code in held:
             self.passthru.write(e.EV_KEY, code, 0)
-        if self.pass_down:
+        if held:
             self.passthru.syn()
         self.pass_down.clear()
 
@@ -224,7 +248,13 @@ class Engine:
                 if val == 1 and self.toggle_mods <= self.mapper.mod_groups(exclude=code):
                     self.toggle_down = True
                     self.enabled = not self.enabled
+                    if pass_dirty:
+                        self.passthru.syn()
+                        pass_dirty = False
                     self.update_active()
+                    # The grab may have just ended (or begun): don't keep
+                    # routing the rest of this batch through passthrough.
+                    grabbed = dev.fd in self.grabbed_fds
                     continue
                 if val != 1 and self.toggle_down:
                     self.toggle_down = val == 2
@@ -239,9 +269,9 @@ class Engine:
                 self.passthru.write(e.EV_KEY, code, val)
                 pass_dirty = True
                 if val == 1:
-                    self.pass_down.add(code)
+                    self.pass_down.setdefault(dev.fd, set()).add(code)
                 elif val == 0:
-                    self.pass_down.discard(code)
+                    self.pass_down.get(dev.fd, set()).discard(code)
         if pass_dirty:
             self.passthru.syn()
         if self.want_grab and not grabbed:

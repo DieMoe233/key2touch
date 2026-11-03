@@ -613,8 +613,10 @@ class Overlay(Gtk.Window):
 
     def finish(self, save):
         self.cancel_binding()
-        self.app.editor_done(save, self.backup)
+        # Close first: if saving fails, a full-screen overlay holding the
+        # keyboard exclusively must never be left behind.
         self.close()
+        self.app.editor_done(save, self.backup)
 
     # ============================================================ drawing
     def draw(self, area, cr, w, h):

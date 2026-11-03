@@ -10,6 +10,7 @@ import json
 import os
 import subprocess
 import sys
+import traceback
 from pathlib import Path
 
 import gi
@@ -61,9 +62,13 @@ class EngineProc:
         *lines, self.buf = self.buf.split(b"\n")
         for line in lines:
             try:
-                self.on_msg(json.loads(line))
+                msg = json.loads(line)
             except ValueError:
-                pass
+                continue
+            try:
+                self.on_msg(msg)
+            except Exception:  # never let one bad message detach us from the engine
+                traceback.print_exc()
         return True
 
     def send(self, **msg):
@@ -98,6 +103,7 @@ def gdk_outputs():
 
 
 APP_ID = "io.github.shorin_kiwata.key2touch"
+NEW_PROFILE_ITEM = "＋ 新建配置…"
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"  # icon when run from source
 
 
@@ -278,7 +284,7 @@ class Key2Touch(Adw.Application):
 
     def _build_header(self):
         hb = Adw.HeaderBar()
-        self.prof_model = Gtk.StringList.new(prof.list_profiles())
+        self.prof_model = Gtk.StringList.new(prof.list_profiles() + [NEW_PROFILE_ITEM])
         self.prof_dd = Gtk.DropDown(model=self.prof_model, tooltip_text="切换配置")
         self.prof_dd.connect("notify::selected", self._on_profile_dd)
         hb.set_title_widget(self.prof_dd)
@@ -394,6 +400,57 @@ class Key2Touch(Adw.Application):
             a = Gio.SimpleAction.new(name, None)
             a.connect("activate", cb)
             self.add_action(a)
+
+        # Actions the CLI drives over D-Bus (org.gtk.Actions), see __main__.py.
+        for name, cb in (("show", lambda *_: self.show_window()),
+                         ("reload", lambda *_: self._reload_from_disk()),
+                         ("edit", lambda *_: self.on_edit()),
+                         ("quit", lambda *_: self.quit())):
+            a = Gio.SimpleAction.new(name, None)
+            a.connect("activate", cb)
+            self.add_action(a)
+        self.enabled_action = Gio.SimpleAction.new_stateful("enabled", None, GLib.Variant("b", True))
+        self.enabled_action.connect("change-state", lambda a, v: self.enable_row.set_active(v.get_boolean()))
+        self.add_action(self.enabled_action)
+        self.profile_action = Gio.SimpleAction.new_stateful("profile", None, GLib.Variant("s", self.name))
+        self.profile_action.connect("change-state", self._on_profile_action)
+        self.add_action(self.profile_action)
+        # Read-only JSON snapshot for `key2touch status`.
+        self.state_action = Gio.SimpleAction.new_stateful("state", None, GLib.Variant("s", "{}"))
+        self.state_action.set_enabled(False)
+        self.add_action(self.state_action)
+
+    def _reload_from_disk(self):
+        """The CLI changed profile files; pick up the change (not mid-edit)."""
+        if self.editor:
+            return
+        names = prof.list_profiles()
+        if self.name in names:
+            self.switch_profile(self.name)
+        elif names:
+            self.switch_profile(names[0])
+
+    def _on_profile_action(self, action, value):
+        name = value.get_string()
+        if name != self.name and prof.exists(name):
+            if self.editor:
+                return  # don't swap the profile out from under the editor
+            self.save_current()
+            self.switch_profile(name)
+
+    def publish_state(self):
+        if not getattr(self, "state_action", None):
+            return
+        st = self.engine_state
+        self.enabled_action.set_state(GLib.Variant("b", self.enable_row.get_active()))
+        self.profile_action.set_state(GLib.Variant("s", self.name))
+        self.state_action.set_state(GLib.Variant("s", json.dumps({
+            "enabled": self.enable_row.get_active(), "active": bool(st.get("active")),
+            "editing": self.editor is not None, "profile": self.name,
+            "output": self.profile["output"], "points": len(self.profile["points"]),
+            "focus": st.get("focus"), "desktop": self.backend.name,
+            "hotkey": self.hotkey_label(), "priority": st.get("priority"),
+        }, ensure_ascii=False)))
 
     # ================================================================ advanced settings
     def show_prefs(self, *_):
@@ -601,13 +658,18 @@ class Key2Touch(Adw.Application):
         was = self._syncing
         self._syncing = True
         names = prof.list_profiles()
-        self.prof_model.splice(0, self.prof_model.get_n_items(), names)
+        self.prof_model.splice(0, self.prof_model.get_n_items(), names + [NEW_PROFILE_ITEM])
         if self.name in names:
             self.prof_dd.set_selected(names.index(self.name))
         self._syncing = was
 
     def _on_profile_dd(self, dd, _):
         if self._syncing:
+            return
+        if dd.get_selected() == self.prof_model.get_n_items() - 1:
+            # The trailing "new profile" entry: snap back, then ask for a name.
+            self.reload_profile_list()
+            self.activate_action("new-profile")
             return
         name = self.prof_model.get_string(dd.get_selected())
         if name and name != self.name:
@@ -689,8 +751,10 @@ class Key2Touch(Adw.Application):
 
     # ================================================================ engine
     def _on_enable(self, row, _):
-        if not self._syncing:
+        # While editing the engine stays off; editor_done() applies this switch.
+        if not self._syncing and not self.editor:
             self.engine.send(cmd="enable", on=row.get_active())
+        self.publish_state()
 
     def on_engine(self, msg):
         ev = msg.get("ev")
@@ -732,6 +796,7 @@ class Key2Touch(Adw.Application):
         else:
             text = "等待匹配的窗口获得焦点"
         self.enable_row.set_subtitle(text)
+        self.publish_state()
 
     # ================================================================ HUD / editor
     def rebuild_hud(self):
@@ -767,12 +832,16 @@ class Key2Touch(Adw.Application):
         self.refresh_status()
 
     def editor_done(self, save, backup):
-        """Called by the editor. `backup` is the current profile as it was when
-        the editor opened (or last switched profiles)."""
+        """Called by the editor after it closed. `backup` is the current profile
+        as it was when the editor opened (or last switched profiles)."""
         self.editor = None
         if not save:
             self.profile = backup
         self.engine.send(cmd="enable", on=self.enable_row.get_active())
-        self.load_into_ui()
+        try:
+            self.load_into_ui()
+        except OSError as ex:
+            self.toast(f"保存失败：{ex}")
+            return
         if save:
             self.toast(f"已保存「{self.name}」")

@@ -52,6 +52,19 @@ key2touch/bin/key2touch
 
 建议 Waydroid 全屏运行，按键点相对整个显示器定位。
 
+## 命令行
+
+```sh
+key2touch on | off | toggle          # 开关映射（适合绑定到桌面快捷键）
+key2touch status --json              # 当前状态
+key2touch profile use 原神            # 切换配置
+key2touch point add tap j 85% 78%    # 不开界面直接添加按键点
+key2touch point add stick 15% 70% --keys w,a,s,d
+```
+
+所有命令都支持 `--json`，退出码固定（0 成功 / 1 错误 / 2 参数错误 / 3 未运行）。
+**AI agent** 可以直接读 `key2touch agent-help` 学会用法：看一眼游戏截图，就能把布局写出来。
+
 ## 桌面支持
 
 | 桌面 | 跟随窗口焦点 | 多显示器触摸映射 | HUD |

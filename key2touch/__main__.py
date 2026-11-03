@@ -1,4 +1,4 @@
-"""python -m key2touch [profile-name]"""
+"""python -m key2touch [--hidden] [-p PROFILE] | key2touch <command> (see --help)"""
 
 import ctypes.util
 import os
@@ -29,17 +29,11 @@ def ensure_layer_shell_preload():
     os.execve(sys.executable, [sys.executable, "-m", "key2touch", *sys.argv[1:]], env)
 
 
-def parse_args():
-    import argparse
-    ap = argparse.ArgumentParser(prog="python -m key2touch",
-                                 description="键盘 → 虚拟触摸屏映射（niri / Waydroid）")
-    ap.add_argument("--hidden", action="store_true", help="启动时只显示托盘图标，不打开窗口")
-    ap.add_argument("profile", nargs="?", help="要打开的配置名（~/.config/key2touch/profiles/<名字>.json）")
-    return ap.parse_args()
-
-
 def main():
-    args = parse_args()  # before re-exec, so --help never needs GTK
+    from .cli import build_parser, main as cli_main
+    args = build_parser().parse_args(sys.argv[1:])  # before re-exec: --help / errors need no GTK
+    if args.cmd:
+        sys.exit(cli_main(sys.argv[1:]))
     ensure_layer_shell_preload()
     from .gui import Key2Touch
     sys.exit(Key2Touch(args.profile, hidden=args.hidden).run([sys.argv[0]]))
