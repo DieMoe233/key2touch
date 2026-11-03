@@ -133,6 +133,20 @@ class JoystickTests(unittest.TestCase):
         self.assertEqual(self.t.log[-1], ("move", 0, 0.2, 0.7))
 
 
+class HotkeyTests(unittest.TestCase):
+    def test_most_specific_wins(self):
+        from key2touch.engine import Engine
+        en = Engine.__new__(Engine)  # only the hotkey matcher; no devices
+        en.hotkeys_on = True
+        en.mapper = Mapper(FakeTouch(), prof())
+        en.hotkeys = {e.KEY_F12: [(frozenset(), "toggle"), (frozenset({"SHIFT"}), "edit")]}
+        self.assertEqual(en.match_hotkey(e.KEY_F12), "toggle")
+        en.mapper.track(e.KEY_LEFTSHIFT, 1)
+        self.assertEqual(en.match_hotkey(e.KEY_F12), "edit")
+        en.hotkeys_on = False
+        self.assertIsNone(en.match_hotkey(e.KEY_F12))
+
+
 class WindowRuleTests(unittest.TestCase):
     def test_rules(self):
         from key2touch.engine import window_matches

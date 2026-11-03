@@ -31,6 +31,8 @@ DEFAULT_PROFILE = {
     "grab": True,
     "toggle_key": "KEY_F12",
     "toggle_mods": [],
+    "edit_key": "KEY_F12",  # Shift+F12 opens the layout editor (F11 is Waydroid's fullscreen)
+    "edit_mods": ["SHIFT"],
     "points": [],
 }
 

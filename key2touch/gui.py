@@ -104,6 +104,8 @@ def gdk_outputs():
 
 APP_ID = "io.github.shorin_kiwata.key2touch"
 NEW_PROFILE_ITEM = "＋ 新建配置…"
+HOTKEYS = {"toggle": ("开关热键", "在任何窗口下按下都能开关映射"),
+           "edit": ("编辑热键", "在游戏里打开布局编辑器，再按一次保存并退出")}
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"  # icon when run from source
 
 
@@ -124,7 +126,7 @@ class Key2Touch(Adw.Application):
         self.prefs = None
         self.engine_state = {"active": False, "enabled": True}
         self._syncing = False
-        self.capturing_hotkey = False
+        self.capturing = None  # "toggle" | "edit" while recording that hotkey
         self.hk_mods = []  # modifier key names held while capturing the hotkey
         self.hk_solo = False
         self.backend = desktop.detect()
@@ -210,7 +212,7 @@ class Key2Touch(Adw.Application):
         self.win.connect("close-request", self._on_close)
         # Losing focus mid-capture would otherwise leave mapping disabled.
         self.win.connect("notify::is-active",
-                         lambda w, _: self.capturing_hotkey and not w.is_active() and self._finish_hotkey())
+                         lambda w, _: self.capturing and not w.is_active() and self._finish_hotkey())
         self.toasts = Adw.ToastOverlay()
         view = Adw.ToolbarView()
         view.add_top_bar(self._build_header())
@@ -332,12 +334,15 @@ class Key2Touch(Adw.Application):
         self.enable_row = Adw.SwitchRow(title="启用映射", active=True)
         self.enable_row.connect("notify::active", self._on_enable)
         g.add(self.enable_row)
-        self.hotkey_row = Adw.ActionRow(title="开关热键", subtitle="在任何窗口下按下都能开关映射")
-        self.hotkey_btn = Gtk.Button(valign=Gtk.Align.CENTER, tooltip_text="点击后按下新的按键或组合键")
-        self.hotkey_btn.connect("clicked", self._on_hotkey_btn)
-        self.hotkey_row.add_suffix(self.hotkey_btn)
-        self.hotkey_row.set_activatable_widget(self.hotkey_btn)
-        g.add(self.hotkey_row)
+        self.hk_rows = {}
+        for kind, (title, sub) in HOTKEYS.items():
+            row = Adw.ActionRow(title=title, subtitle=sub)
+            btn = Gtk.Button(valign=Gtk.Align.CENTER, tooltip_text="点击后按下新的按键或组合键")
+            btn.connect("clicked", lambda _b, k=kind: self._on_hotkey_btn(k))
+            row.add_suffix(btn)
+            row.set_activatable_widget(btn)
+            g.add(row)
+            self.hk_rows[kind] = (row, btn)
         return g
 
     def _build_output_group(self):
@@ -449,7 +454,8 @@ class Key2Touch(Adw.Application):
             "editing": self.editor is not None, "profile": self.name,
             "output": self.profile["output"], "points": len(self.profile["points"]),
             "focus": st.get("focus"), "desktop": self.backend.name,
-            "hotkey": self.hotkey_label(), "priority": st.get("priority"),
+            "hotkey": self.hotkey_label(), "edit_hotkey": self.hotkey_label("edit"),
+            "priority": st.get("priority"),
         }, ensure_ascii=False)))
 
     # ================================================================ advanced settings
@@ -681,7 +687,7 @@ class Key2Touch(Adw.Application):
         self.reload_profile_list()
         self.out_row.set_selected(self.out_names.index(self.profile["output"]))
         self._update_output_subtitle()
-        self.hotkey_btn.set_label(self.hotkey_label() or "未设置")
+        self._refresh_hotkey_rows()
         self._syncing = False
         if self.prefs:
             self.prefs.close()  # its widgets show the previous profile
@@ -695,34 +701,52 @@ class Key2Touch(Adw.Application):
         o = self.outputs[self.out_names[self.out_row.get_selected()]]
         self.out_row.set_subtitle("游戏窗口所在的显示器" + (f"（{o['model']}）" if o["model"] else ""))
 
-    # ================================================================ hotkey
-    def hotkey_label(self):
+    # ================================================================ hotkeys
+    def hotkey_label(self, kind="toggle"):
         p = self.profile
-        return combo_label(p["toggle_key"], p.get("toggle_mods")) if p.get("toggle_key") else None
+        key = p.get(f"{kind}_key")
+        return combo_label(key, p.get(f"{kind}_mods")) if key else None
 
-    def _on_hotkey_btn(self, *_):
-        self.capturing_hotkey = True
+    def _refresh_hotkey_rows(self):
+        for kind, (row, btn) in self.hk_rows.items():
+            btn.set_label(self.hotkey_label(kind) or "未设置")
+            row.set_subtitle(HOTKEYS[kind][1])
+
+    def _on_hotkey_btn(self, kind):
+        self.capturing = kind
         self.hk_mods.clear()
         self.hk_solo = False
-        self.hotkey_btn.set_label("按下按键或组合键…")
-        self.hotkey_row.set_subtitle("Esc 取消")
-        self.engine.send(cmd="enable", on=False)  # so the old hotkey can't toggle meanwhile
+        row, btn = self.hk_rows[kind]
+        btn.set_label("按下按键或组合键…")
+        row.set_subtitle("Esc 取消，Backspace 清除")
+        # So the old hotkeys can't fire while the new one is being pressed.
+        self.engine.send(cmd="hotkeys", on=False)
 
-    def _finish_hotkey(self, name=None, mods=()):
-        self.capturing_hotkey = False
+    def _finish_hotkey(self, name=None, mods=(), clear=False):
+        kind, self.capturing = self.capturing, None
         self.hk_mods.clear()
-        self.engine.send(cmd="enable", on=self.enable_row.get_active())
-        if name:
-            self.profile["toggle_mods"] = [m for m in MOD_ORDER if m in mods]
-            self.set_opt("toggle_key", name)
-        self.hotkey_btn.set_label(self.hotkey_label() or "未设置")
-        self.hotkey_row.set_subtitle("在任何窗口下按下都能开关映射")
+        self.engine.send(cmd="hotkeys", on=True)
+        if clear:
+            self.profile[f"{kind}_mods"] = []
+            self.set_opt(f"{kind}_key", None)
+        elif name:
+            mods = [m for m in MOD_ORDER if m in mods]
+            other = "edit" if kind == "toggle" else "toggle"
+            if name == self.profile.get(f"{other}_key") and mods == (self.profile.get(f"{other}_mods") or []):
+                self.toast(f"{combo_label(name, mods)} 已经是{HOTKEYS[other][0]}")
+            else:
+                self.profile[f"{kind}_mods"] = mods
+                self.set_opt(f"{kind}_key", name)
+        self._refresh_hotkey_rows()
 
     def _on_window_key(self, c, keyval, keycode, state):
-        if not self.capturing_hotkey:
+        if not self.capturing:
             return False
         if keyval == Gdk.KEY_Escape:
             self._finish_hotkey()
+            return True
+        if keyval == Gdk.KEY_BackSpace and not self.hk_mods:
+            self._finish_hotkey(clear=True)
             return True
         name = key_name(keycode - 8)
         if not name:
@@ -733,13 +757,13 @@ class Key2Touch(Adw.Application):
                 self.hk_mods.append(name)
             self.hk_solo = True
             held = "+".join(MOD_LABEL[MOD_NAME_GROUP[m]] for m in self.hk_mods)
-            self.hotkey_btn.set_label(f"{held}+…")
+            self.hk_rows[self.capturing][1].set_label(f"{held}+…")
             return True
         self._finish_hotkey(name, {MOD_NAME_GROUP[m] for m in self.hk_mods})
         return True
 
     def _on_window_key_released(self, c, keyval, keycode, state):
-        if not self.capturing_hotkey:
+        if not self.capturing:
             return
         name = key_name(keycode - 8)
         if name not in self.hk_mods:
@@ -761,6 +785,11 @@ class Key2Touch(Adw.Application):
         if ev == "key":
             if self.hud:
                 self.hud.key_event(msg["code"], msg.get("idx"), msg["down"])
+        elif ev == "hotkey" and msg.get("action") == "edit":
+            if self.editor:
+                self.editor.finish(True)  # second press: save and leave the editor
+            else:
+                self.on_edit()
         elif ev == "state":
             self.engine_state = msg
             if not self.synced_after_start:
@@ -768,7 +797,7 @@ class Key2Touch(Adw.Application):
                 self.synced_after_start = True
                 self.backend.touch_sync(self.profile["output"])
                 self.refresh_banner()
-            if not self.editor and not self.capturing_hotkey and self.enable_row.get_active() != msg["enabled"]:
+            if not self.editor and self.enable_row.get_active() != msg["enabled"]:
                 self._syncing = True
                 self.enable_row.set_active(msg["enabled"])
                 self._syncing = False

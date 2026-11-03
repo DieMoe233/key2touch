@@ -87,9 +87,9 @@ class Engine:
         self.grabbed_fds = set()
         self.profile = {}
         self.mapper = Mapper(self.touch, {})
-        self.toggle = None
-        self.toggle_mods = frozenset()
-        self.toggle_down = False  # the hotkey press was consumed; swallow its release too
+        self.hotkeys = {}  # keycode -> [(mods frozenset, action)]
+        self.hotkey_down = set()  # keycodes whose press fired a hotkey; swallow release/repeat
+        self.hotkeys_on = True  # off while the GUI records a new hotkey
         self.enabled = True
         self.backend = desktop.detect()
         self.focus_src = None  # None: this desktop can't report focus
@@ -150,7 +150,7 @@ class Engine:
             self.passthru.syn()
         self.mapper.release_all()
         self.mapper.mods_down.clear()
-        self.toggle_down = False
+        self.hotkey_down.clear()
         if dev:
             try:
                 dev.close()
@@ -222,9 +222,22 @@ class Engine:
         mods = self.mapper.mods_down
         self.mapper = Mapper(self.touch, prof, aspect)
         self.mapper.mods_down = mods
-        self.toggle = keycode(prof.get("toggle_key"))
-        self.toggle_mods = frozenset(prof.get("toggle_mods") or ())
+        self.hotkeys = {}
+        for action, key, mods in (("toggle", "toggle_key", "toggle_mods"), ("edit", "edit_key", "edit_mods")):
+            code = keycode(prof.get(key))
+            if code is not None:
+                self.hotkeys.setdefault(code, []).append((frozenset(prof.get(mods) or ()), action))
         self.update_active()
+
+    def match_hotkey(self, code):
+        """Most specific hotkey whose modifiers are held: with toggle = F12 and
+        edit = Shift+F12, Shift+F12 fires only edit."""
+        cands = self.hotkeys.get(code) if self.hotkeys_on else None
+        if not cands:
+            return None
+        held = self.mapper.mod_groups(exclude=code)
+        best = max((c for c in cands if c[0] <= held), key=lambda c: len(c[0]), default=None)
+        return best[1] if best else None
 
     # ---- event handling (hot path) ----
     def on_key_events(self, dev):
@@ -244,21 +257,25 @@ class Engine:
                 continue
             code, val = ev.code, ev.value
             self.mapper.track(code, val)
-            if code == self.toggle and code is not None:
-                if val == 1 and self.toggle_mods <= self.mapper.mod_groups(exclude=code):
-                    self.toggle_down = True
-                    self.enabled = not self.enabled
-                    if pass_dirty:
-                        self.passthru.syn()
-                        pass_dirty = False
-                    self.update_active()
-                    # The grab may have just ended (or begun): don't keep
-                    # routing the rest of this batch through passthrough.
-                    grabbed = dev.fd in self.grabbed_fds
+            if code in self.hotkey_down and val != 1:
+                if val == 0:
+                    self.hotkey_down.discard(code)
+                continue
+            action = self.match_hotkey(code) if val == 1 else None
+            if action:
+                self.hotkey_down.add(code)
+                if action == "edit":
+                    self.emit(ev="hotkey", action="edit")  # the GUI opens / closes the editor
                     continue
-                if val != 1 and self.toggle_down:
-                    self.toggle_down = val == 2
-                    continue
+                self.enabled = not self.enabled
+                if pass_dirty:
+                    self.passthru.syn()
+                    pass_dirty = False
+                self.update_active()
+                # The grab may have just ended (or begun): don't keep
+                # routing the rest of this batch through passthrough.
+                grabbed = dev.fd in self.grabbed_fds
+                continue
             if self.active or val != 1:
                 idx = self.mapper.key(code, val)
                 if idx is not None:
@@ -300,6 +317,8 @@ class Engine:
             cmd = msg.get("cmd")
             if cmd == "profile":
                 self.set_profile(msg["profile"], msg.get("aspect", 16 / 9))
+            elif cmd == "hotkeys":
+                self.hotkeys_on = bool(msg["on"])
             elif cmd == "enable":
                 self.enabled = bool(msg["on"])
                 self.update_active()

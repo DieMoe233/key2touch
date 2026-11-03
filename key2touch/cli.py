@@ -67,7 +67,7 @@ Case-insensitive names: `j`, `space`, `enter`, `esc`, `f1`, `up`, `lshift`,
     profiles                            list profiles
     profile show|use|new|rm|rename|export|import
     point list|add|set|rm|clear         edit points (index from `point list`)
-    set output|hotkey|grab|only-focused VALUE
+    set output|hotkey|edit-hotkey|grab|only-focused VALUE   (hotkeys: e.g. ctrl+f12, or none)
     window list|add|rm [PATTERN]        app_id rules for only-focused (* wildcards)
 
 Exit codes: 0 ok, 1 error, 2 bad usage, 3 not running.
@@ -237,15 +237,17 @@ def cmd_control(args, out):
             return EXIT_NOT_RUNNING
         st = app_state()
         st["running"] = True
-        if st.get("hotkey"):
-            try:
-                st["hotkey"] = fmt_key(*parse_key(st["hotkey"]))
-            except CliError:
-                pass
+        for k in ("hotkey", "edit_hotkey"):
+            if st.get(k):
+                try:
+                    st[k] = fmt_key(*parse_key(st[k]))
+                except CliError:
+                    pass
         state = "编辑中" if st.get("editing") else "生效中" if st.get("active") else \
             "已开启（等待目标窗口）" if st.get("enabled") else "已关闭"
         out.emit(st, f"{state} · 配置 {st.get('profile')} · {st.get('points')} 个按键点 · "
-                     f"显示器 {st.get('output')} · 焦点 {st.get('focus') or '-'} · 热键 {st.get('hotkey') or '-'}")
+                     f"显示器 {st.get('output')} · 焦点 {st.get('focus') or '-'} · "
+                     f"开关热键 {st.get('hotkey') or '-'} · 编辑热键 {st.get('edit_hotkey') or '-'}")
         return 0
     from gi.repository import GLib
     if args.cmd in ("on", "off"):
@@ -281,8 +283,10 @@ def cmd_profile(args, out):
     if sub == "show":
         name = target_profile(args)
         p = prof.load(name)
-        data = {"name": name, "output": p["output"], "hotkey": fmt_key(p["toggle_key"], p.get("toggle_mods"))
-                if p.get("toggle_key") else None, "grab": p.get("grab", True),
+        data = {"name": name, "output": p["output"],
+                "hotkey": fmt_key(p["toggle_key"], p.get("toggle_mods")) if p.get("toggle_key") else None,
+                "edit_hotkey": fmt_key(p["edit_key"], p.get("edit_mods")) if p.get("edit_key") else None,
+                "grab": p.get("grab", True),
                 "only_focused": p.get("only_focused", False), "windows": p["windows"],
                 "points": [describe_point(i, q) for i, q in enumerate(p["points"])]}
         out.emit(data, "\n".join([f"{name}  显示器 {data['output']}  热键 {data['hotkey']}",
@@ -480,11 +484,16 @@ def cmd_set(args, out):
     def change(p):
         if args.option == "output":
             p["output"] = args.value
-        elif args.option == "hotkey":
+        elif args.option in ("hotkey", "edit-hotkey"):
+            kind = "toggle" if args.option == "hotkey" else "edit"
             if args.value.lower() in ("none", ""):
-                p["toggle_key"], p["toggle_mods"] = None, []
+                p[f"{kind}_key"], p[f"{kind}_mods"] = None, []
             else:
-                p["toggle_key"], p["toggle_mods"] = parse_key(args.value)
+                key, mods = parse_key(args.value)
+                other = "edit" if kind == "toggle" else "toggle"
+                if key == p.get(f"{other}_key") and mods == (p.get(f"{other}_mods") or []):
+                    raise CliError(f"{fmt_key(key, mods)} 已经被另一个热键使用")
+                p[f"{kind}_key"], p[f"{kind}_mods"] = key, mods
         elif args.option == "grab":
             p["grab"] = parse_bool(args.value)
         elif args.option == "only-focused":
@@ -582,7 +591,7 @@ def build_parser():
     pt.add_parser("clear", help="清空按键点", parents=[common, target])
 
     p = sp.add_parser("set", help="修改配置选项", parents=[common, target])
-    p.add_argument("option", choices=["output", "hotkey", "grab", "only-focused"])
+    p.add_argument("option", choices=["output", "hotkey", "edit-hotkey", "grab", "only-focused"])
     p.add_argument("value")
 
     p = sp.add_parser("window", help="仅聚焦指定窗口时生效的匹配规则", parents=[common, target])

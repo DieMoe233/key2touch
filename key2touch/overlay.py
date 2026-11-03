@@ -575,14 +575,15 @@ class Overlay(Gtk.Window):
             return True
         mods = {MOD_NAME_GROUP[m] for m in self.mods_held}
         if self.is_hotkey(name, mods):
-            self.show_toast(f"{combo_label(name, mods)} 是开关热键，不能绑定")
+            self.show_toast(f"{combo_label(name, mods)} 是热键，不能绑定")
             return True
         self._bind(name, mods)
         return True
 
     def is_hotkey(self, name, mods):
         p = self.app.profile
-        return name == p.get("toggle_key") and set(mods) == set(p.get("toggle_mods") or ())
+        return any(name == p.get(f"{k}_key") and set(mods) == set(p.get(f"{k}_mods") or ())
+                   for k in ("toggle", "edit"))
 
     def _key_released(self, c, keyval, keycode, state):
         name = key_name(keycode - 8)
@@ -592,7 +593,7 @@ class Overlay(Gtk.Window):
             # Modifier pressed and released on its own: bind the modifier itself.
             others = {MOD_NAME_GROUP[m] for m in self.mods_held if m != name}
             if self.is_hotkey(name, others):
-                self.show_toast(f"{combo_label(name, others)} 是开关热键，不能绑定")
+                self.show_toast(f"{combo_label(name, others)} 是热键，不能绑定")
                 self.mods_held.remove(name)
                 return
             self._bind(name, others)

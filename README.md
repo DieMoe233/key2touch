@@ -50,7 +50,7 @@ key2touch/bin/key2touch
 2. **启用映射**：打开开关，或在任意窗口按开关热键（默认 F12）
 3. **选择显示器**：选游戏窗口所在的那一块
 
-建议 Waydroid 全屏运行，按键点相对整个显示器定位。
+在游戏里按 **Shift+F12** 直接打开编辑器，再按一次保存并退出。建议 Waydroid 全屏运行，按键点相对整个显示器定位。
 
 ## 命令行
 
@@ -60,6 +60,7 @@ key2touch status --json              # 当前状态
 key2touch profile use 原神            # 切换配置
 key2touch point add tap j 85% 78%    # 不开界面直接添加按键点
 key2touch point add stick 15% 70% --keys w,a,s,d
+key2touch set edit-hotkey ctrl+e     # 修改编辑热键
 ```
 
 所有命令都支持 `--json`，退出码固定（0 成功 / 1 错误 / 2 参数错误 / 3 未运行）。
