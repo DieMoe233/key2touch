@@ -210,6 +210,8 @@ class Mapper:
             self.controls.append(c)
             for code, mods in binds:
                 self.bindings.setdefault(code, []).append((mods, i))
+        # Mouse buttons bound to taps: the mouse must then be captured while active.
+        self.mouse_binds = any(e.BTN_MISC <= c < e.KEY_OK for c in self.bindings)
         self.mods_down = set()  # held modifier keycodes (all keyboards)
         self.fired = {}  # keycode -> control index it triggered on press
 

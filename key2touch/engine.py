@@ -167,6 +167,9 @@ class Engine:
         self.mice = {}  # fd -> InputDevice; grabbed only while camera mode is on
         self.mice_grabbed = set()
         self.want_mouse_grab = False
+        self.mouse_mode_now = None
+        self.passmouse = None  # virtual mouse for motion/unbound buttons in "buttons" mode
+        self.passmouse_down = set()
         self.cursor_free = False  # mouse cursor shown instead of camera mode
         self.cursor_tap = False  # cursor key is down and nothing else was pressed since
         self.paths = set()
@@ -197,7 +200,7 @@ class Engine:
     def emit_state(self):
         self.emit(ev="state", active=self.active, enabled=self.enabled,
                   focus=self.focus_app, keyboards=len(self.kbds), mice=len(self.mice),
-                  look=self.want_mouse_grab,
+                  look=self.mouse_mode_now == "look", mouse=self.mouse_mode_now,
                   priority=self.priority, desktop=self.backend.name,
                   focus_tracking=self.focus_src is not None)
 
@@ -319,24 +322,42 @@ class Engine:
         except OSError:
             pass
 
+    def mouse_mode(self):
+        """How the mouse is used while mapping is active:
+        "look"    camera area active: motion turns the camera, buttons can be bound
+        "buttons" profile binds mouse buttons but has no camera area: bound
+                  buttons become touches, motion and the rest go back out
+                  through a virtual mouse so the cursor keeps working
+        None      mouse left alone (inactive, cursor shown with the cursor key,
+                  or nothing in the profile uses the mouse)"""
+        if not self.active:
+            return None
+        if self.mapper.look:
+            return None if self.cursor_free else "look"
+        return "buttons" if self.mapper.mouse_binds else None
+
     def update_look(self):
-        """Camera mode = mapping active + a look point + cursor key not held.
-        While on, mice are grabbed: motion drives the camera, buttons can be
-        bound like keys, the cursor stays put."""
-        want = bool(self.active and self.mapper.look and not self.cursor_free)
-        if want == self.want_mouse_grab:
+        mode = self.mouse_mode()
+        if mode == self.mouse_mode_now:
             return
-        self.want_mouse_grab = want
-        if want:
+        self.mouse_mode_now = mode
+        if mode != "look" and self.mapper.look:
+            self.mapper.look.reset()
+        self.want_mouse_grab = mode is not None
+        if mode == "buttons" and self.passmouse is None:
+            caps = {e.EV_REL: [e.REL_X, e.REL_Y, e.REL_WHEEL, e.REL_HWHEEL, e.REL_WHEEL_HI_RES, e.REL_HWHEEL_HI_RES],
+                    e.EV_KEY: [e.BTN_LEFT, e.BTN_RIGHT, e.BTN_MIDDLE, e.BTN_SIDE, e.BTN_EXTRA]}
+            self.passmouse = UInput(caps, name="key2touch passthrough mouse")
+        if mode is not None:
             for dev in self.mice.values():
                 self.try_grab_mouse(dev)
         else:
-            self.mapper.look and self.mapper.look.reset()
             for code in [c for c in self.mapper.fired if e.BTN_MISC <= c < e.KEY_OK]:
                 idx = self.mapper.key(code, 0)  # mouse-button taps
                 if idx is not None:
                     self.emit(ev="key", code=code, idx=idx, down=False)
             self.mirror.release_all()
+            self._release_passmouse()
             for fd in self.mice_grabbed:
                 try:
                     self.mice[fd].ungrab()
@@ -344,6 +365,14 @@ class Engine:
                     pass
             self.mice_grabbed.clear()
         self.emit_state()
+
+    def _release_passmouse(self):
+        # Buttons held through the virtual mouse would stay stuck otherwise.
+        if self.passmouse and self.passmouse_down:
+            for code in self.passmouse_down:
+                self.passmouse.write(e.EV_KEY, code, 0)
+            self.passmouse.syn()
+        self.passmouse_down.clear()
 
     def on_mouse_events(self, dev):
         try:
@@ -358,26 +387,41 @@ class Engine:
             if self.want_mouse_grab:
                 self.try_grab_mouse(dev)
             return
+        look = self.mouse_mode_now == "look"
         dx = dy = 0
+        out = False  # anything written to the virtual mouse
         for ev in events:
             if ev.type == e.EV_REL:
-                if ev.code == e.REL_X:
-                    dx += ev.value
-                elif ev.code == e.REL_Y:
-                    dy += ev.value
+                if look:
+                    if ev.code == e.REL_X:
+                        dx += ev.value
+                    elif ev.code == e.REL_Y:
+                        dy += ev.value
+                else:
+                    self.passmouse.write(e.EV_REL, ev.code, ev.value)
+                    out = True
             elif ev.type == e.EV_KEY and ev.value != 2:
                 self.cursor_tap = False
                 if ev.value == 1:
                     self.dev_down.setdefault(dev.fd, set()).add(ev.code)
                 else:
                     self.dev_down.get(dev.fd, set()).discard(ev.code)
-                idx = self.mapper.key(ev.code, ev.value)  # unbound buttons are dropped
-                self.mirror.key(ev.code, ev.value)  # grabbed: key displays still see clicks
+                idx = self.mapper.key(ev.code, ev.value)
                 if idx is not None:
+                    self.mirror.key(ev.code, ev.value)  # grabbed: key displays still see it
                     self.emit(ev="key", code=ev.code, idx=idx, down=ev.value == 1)
+                elif not look:
+                    # Unbound button in "buttons" mode: a normal click.
+                    self.passmouse.write(e.EV_KEY, ev.code, ev.value)
+                    (self.passmouse_down.add if ev.value else self.passmouse_down.discard)(ev.code)
+                    out = True
+                else:
+                    self.mirror.key(ev.code, ev.value)  # camera mode: dropped, but shown
+        if out:
+            self.passmouse.syn()
         self.mirror.syn()
         # One touch move per read batch, however fast the mouse polls.
-        if self.mapper.look:
+        if look:
             self.mapper.look.motion(dx, dy, time.monotonic())
 
     # ---- state ----
@@ -583,6 +627,8 @@ class Engine:
             self.mapper.release_all()
             self.set_grab(False)
             self.mirror.close()
+            if self.passmouse:
+                self.passmouse.close()
             self.touch.close()
 
 
