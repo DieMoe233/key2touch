@@ -29,10 +29,10 @@ DEFAULT_PROFILE = {
     # Waydroid is "Waydroid" in full-UI mode and "waydroid.<package>" per app.
     "windows": ["Waydroid", "waydroid.*"],
     "grab": True,
-    "toggle_key": "KEY_F12",
+    "toggle_key": "KEY_F1",
     "toggle_mods": [],
-    "edit_key": "KEY_F12",  # Shift+F12 opens the layout editor (F11 is Waydroid's fullscreen)
-    "edit_mods": ["SHIFT"],
+    "edit_key": "KEY_F2",  # opens / closes the layout editor (F11 is Waydroid's fullscreen)
+    "edit_mods": [],
     "points": [],
 }
 
