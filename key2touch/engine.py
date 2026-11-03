@@ -73,6 +73,73 @@ def is_keyboard(dev):
     return e.KEY_A in keys and e.KEY_SPACE in keys
 
 
+MIRROR_NAME = "key2touch key mirror"
+
+
+def udev_ignored(path):
+    """True if udev tagged the device LIBINPUT_IGNORE_DEVICE=1 (our udev rule)."""
+    try:
+        rdev = os.stat(path).st_rdev
+        with open(f"/run/udev/data/c{os.major(rdev)}:{os.minor(rdev)}") as f:
+            return "E:LIBINPUT_IGNORE_DEVICE=1" in f.read()
+    except OSError:
+        return False
+
+
+class Mirror:
+    """A keyboard that repeats the keys key2touch swallows (mapped keys and
+    hotkeys while grabbed), for on-screen key displays such as seekey or
+    showmethekey that read evdev directly.
+
+    The compositor must never see it, or mapped keys would reach the game:
+    the package's udev rule marks it LIBINPUT_IGNORE_DEVICE. Nothing is
+    written until that mark is confirmed; without it the mirror is closed."""
+
+    def __init__(self):
+        self.ui, self.ok, self.checked = None, False, False
+        self.down, self.dirty = set(), False
+        try:
+            self.ui = UInput(name=MIRROR_NAME)
+        except OSError:
+            self.checked = True
+        self.created = time.monotonic()
+
+    def verify(self):
+        if self.checked or time.monotonic() - self.created < 0.5:
+            return
+        self.checked = True
+        self.ok = udev_ignored(self.ui.device.path)
+        if not self.ok:
+            self.ui.close()
+            self.ui = None
+            log("key mirror off: udev rule (LIBINPUT_IGNORE_DEVICE) not installed")
+
+    def key(self, code, val):
+        if self.ok:
+            if val == 1:
+                self.down.add(code)
+            elif val == 0:
+                self.down.discard(code)
+            self.ui.write(e.EV_KEY, code, val)
+            self.dirty = True
+
+    def syn(self):
+        if self.dirty:
+            self.ui.syn()
+            self.dirty = False
+
+    def release_all(self):
+        for code in self.down:
+            self.ui.write(e.EV_KEY, code, 0)
+            self.dirty = True
+        self.down.clear()
+        self.syn()
+
+    def close(self):
+        if self.ui:
+            self.ui.close()
+
+
 def is_mouse(dev):
     if dev.name.startswith(OWN_PREFIX) or is_keyboard(dev):
         return False
@@ -93,6 +160,7 @@ class Engine:
     def __init__(self):
         self.touch = TouchScreen()
         self.passthru = None  # virtual keyboard, created on first grab
+        self.mirror = Mirror()
         self.pass_down = {}  # fd -> keycodes currently held via the passthrough device
         self.dev_down = {}  # fd -> every keycode currently held on that device
         self.kbds = {}  # fd -> InputDevice
@@ -226,6 +294,7 @@ class Engine:
         # Keys pressed through the passthrough device would otherwise stay
         # stuck: their real release now goes to libinput, which never saw
         # the press.
+        self.mirror.release_all()
         held = set().union(*self.pass_down.values()) if self.pass_down else set()
         for code in held:
             self.passthru.write(e.EV_KEY, code, 0)
@@ -267,6 +336,7 @@ class Engine:
                 idx = self.mapper.key(code, 0)  # mouse-button taps
                 if idx is not None:
                     self.emit(ev="key", code=code, idx=idx, down=False)
+            self.mirror.release_all()
             for fd in self.mice_grabbed:
                 try:
                     self.mice[fd].ungrab()
@@ -302,8 +372,10 @@ class Engine:
                 else:
                     self.dev_down.get(dev.fd, set()).discard(ev.code)
                 idx = self.mapper.key(ev.code, ev.value)  # unbound buttons are dropped
+                self.mirror.key(ev.code, ev.value)  # grabbed: key displays still see clicks
                 if idx is not None:
                     self.emit(ev="key", code=ev.code, idx=idx, down=ev.value == 1)
+        self.mirror.syn()
         # One touch move per read batch, however fast the mouse polls.
         if self.mapper.look:
             self.mapper.look.motion(dx, dy, time.monotonic())
@@ -372,6 +444,8 @@ class Engine:
             if code in self.hotkey_down and val != 1:
                 if val == 0:
                     self.hotkey_down.discard(code)
+                if grabbed:
+                    self.mirror.key(code, val)
                 continue
             if code == self.mapper.cursor_key and val != 2:
                 # Not swallowed: the key (default Ctrl) also serves in combos.
@@ -388,6 +462,8 @@ class Engine:
                 self.cursor_tap = False  # Ctrl+Q etc. is a combo, not a tap
             action = self.match_hotkey(code) if val == 1 else None
             if action:
+                if grabbed:
+                    self.mirror.key(code, val)
                 self.hotkey_down.add(code)
                 if action == "edit":
                     self.emit(ev="hotkey", action="edit")  # the GUI opens / closes the editor
@@ -408,6 +484,8 @@ class Engine:
                 if idx is not None:
                     if val != 2:
                         self.emit(ev="key", code=code, idx=idx, down=val == 1)
+                    if grabbed:
+                        self.mirror.key(code, val)
                     continue
             if grabbed:
                 self.passthru.write(e.EV_KEY, code, val)
@@ -418,6 +496,7 @@ class Engine:
                     self.pass_down.get(dev.fd, set()).discard(code)
         if pass_dirty:
             self.passthru.syn()
+        self.mirror.syn()
         if self.want_grab and not grabbed:
             self.try_grab(dev)
 
@@ -495,6 +574,7 @@ class Engine:
                 if now - last_scan >= 1.0:
                     last_scan = now
                     self.rescan()
+                    self.mirror.verify()
                     if not ready:
                         gc.collect(0)
         finally:
@@ -502,6 +582,7 @@ class Engine:
             self.update_look()  # ungrabs the mice
             self.mapper.release_all()
             self.set_grab(False)
+            self.mirror.close()
             self.touch.close()
 
 

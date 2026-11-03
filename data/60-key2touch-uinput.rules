@@ -1,2 +1,6 @@
 # key2touch creates a virtual touchscreen and keyboard through uinput.
 KERNEL=="uinput", SUBSYSTEM=="misc", OPTIONS+="static_node=uinput", GROUP="input", MODE="0660"
+# The key mirror repeats keys key2touch swallows, for on-screen key displays
+# (seekey, showmethekey) that read evdev. The compositor must ignore it,
+# otherwise mapped keys would also reach the game.
+SUBSYSTEM=="input", ATTRS{name}=="key2touch key mirror", ENV{LIBINPUT_IGNORE_DEVICE}="1"
