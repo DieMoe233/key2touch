@@ -26,6 +26,7 @@ from .touch import TouchScreen
 OWN_PREFIX = "key2touch"
 
 
+PASSTHRU_SETTLE = 1.0  # s after creating passthrough devices before grabbing anything
 RT_PRIORITY = 10
 RT_TIME_US = 100_000  # rtkit requires RLIMIT_RTTIME <= its RTTimeUSecMax (200 ms)
 
@@ -159,7 +160,14 @@ def grabbable(dev):
 class Engine:
     def __init__(self):
         self.touch = TouchScreen()
-        self.passthru = None  # virtual keyboard, created on first grab
+        # Passthrough devices are created up front: a fresh uinput device takes
+        # a moment before the compositor uses it, and grabbing the real
+        # keyboard/mouse before that would freeze input for that moment.
+        self.passthru = UInput(name="key2touch passthrough keyboard")
+        caps = {e.EV_REL: [e.REL_X, e.REL_Y, e.REL_WHEEL, e.REL_HWHEEL, e.REL_WHEEL_HI_RES, e.REL_HWHEEL_HI_RES],
+                e.EV_KEY: [e.BTN_LEFT, e.BTN_RIGHT, e.BTN_MIDDLE, e.BTN_SIDE, e.BTN_EXTRA]}
+        self.passmouse = UInput(caps, name="key2touch passthrough mouse")
+        self.devices_ready_at = time.monotonic() + PASSTHRU_SETTLE
         self.mirror = Mirror()
         self.pass_down = {}  # fd -> keycodes currently held via the passthrough device
         self.dev_down = {}  # fd -> every keycode currently held on that device
@@ -168,7 +176,6 @@ class Engine:
         self.mice_grabbed = set()
         self.want_mouse_grab = False
         self.mouse_mode_now = None
-        self.passmouse = None  # virtual mouse for motion/unbound buttons in "buttons" mode
         self.passmouse_down = set()
         self.cursor_free = False  # mouse cursor shown instead of camera mode
         self.cursor_tap = False  # cursor key is down and nothing else was pressed since
@@ -180,7 +187,7 @@ class Engine:
         self.hotkeys = {}  # keycode -> [(mods frozenset, action)]
         self.hotkey_down = set()  # keycodes whose press fired a hotkey; swallow release/repeat
         self.hotkeys_on = True  # off while the GUI records a new hotkey
-        self.enabled = True
+        self.enabled = os.environ.get("KEY2TOUCH_ENABLED", "1") != "0"
         self.backend = desktop.detect()
         self.focus_src = None  # None: this desktop can't report focus
         self.focus_app = None
@@ -264,7 +271,7 @@ class Engine:
     def try_grab(self, dev):
         # Only grab while no key is held on this device: a key pressed before
         # the grab would have its release swallowed and get stuck in niri.
-        if dev.fd in self.grabbed_fds or not grabbable(dev):
+        if dev.fd in self.grabbed_fds or not grabbable(dev) or time.monotonic() < self.devices_ready_at:
             return
         try:
             if dev.active_keys():
@@ -279,13 +286,20 @@ class Engine:
         except OSError:
             pass
 
+    def retry_grabs(self):
+        """Grabs deferred while the passthrough devices settled (or a key was held)."""
+        if self.want_grab:
+            for dev in self.kbds.values():
+                self.try_grab(dev)
+        if self.want_mouse_grab:
+            for dev in self.mice.values():
+                self.try_grab_mouse(dev)
+
     def set_grab(self, on):
         if on == self.want_grab:
             return
         self.want_grab = on
         if on:
-            if self.passthru is None:
-                self.passthru = UInput(name="key2touch passthrough keyboard")
             for dev in self.kbds.values():
                 self.try_grab(dev)
             return
@@ -310,7 +324,7 @@ class Engine:
     def try_grab_mouse(self, dev):
         # Same rule as keyboards: never grab with a button held, or its
         # release is swallowed and the button sticks in the compositor.
-        if dev.fd in self.mice_grabbed:
+        if dev.fd in self.mice_grabbed or time.monotonic() < self.devices_ready_at:
             return
         try:
             if dev.active_keys():
@@ -345,10 +359,6 @@ class Engine:
         if mode != "look" and self.mapper.look:
             self.mapper.look.reset()
         self.want_mouse_grab = mode is not None
-        if mode == "buttons" and self.passmouse is None:
-            caps = {e.EV_REL: [e.REL_X, e.REL_Y, e.REL_WHEEL, e.REL_HWHEEL, e.REL_WHEEL_HI_RES, e.REL_HWHEEL_HI_RES],
-                    e.EV_KEY: [e.BTN_LEFT, e.BTN_RIGHT, e.BTN_MIDDLE, e.BTN_SIDE, e.BTN_EXTRA]}
-            self.passmouse = UInput(caps, name="key2touch passthrough mouse")
         if mode is not None:
             for dev in self.mice.values():
                 self.try_grab_mouse(dev)
@@ -616,6 +626,12 @@ class Engine:
                 if self.focus_src:
                     fds.append(self.focus_src.fileno())
                 timeout = 1.0
+                settle = self.devices_ready_at - time.monotonic()
+                if settle > 0:
+                    timeout = min(timeout, settle)
+                elif self.devices_ready_at:
+                    self.devices_ready_at = 0  # passthroughs usable: do the deferred grabs now
+                    self.retry_grabs()
                 look = self.mapper.look
                 if look and look.deadline() is not None:
                     timeout = max(0.0, min(timeout, look.deadline() - time.monotonic()))
@@ -636,6 +652,7 @@ class Engine:
                     last_scan = now
                     self.rescan()
                     self.mirror.verify()
+                    self.retry_grabs()
                     if not ready:
                         gc.collect(0)
         finally:

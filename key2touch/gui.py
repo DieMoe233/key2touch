@@ -40,8 +40,9 @@ window.key2touch-overlay, window.key2touch-overlay > * { background: transparent
 
 
 class EngineProc:
-    def __init__(self, on_msg):
+    def __init__(self, on_msg, enabled=True):
         env = dict(os.environ)
+        env["KEY2TOUCH_ENABLED"] = "1" if enabled else "0"  # start in the remembered state
         env.pop("LD_PRELOAD", None)
         env["PYTHONPATH"] = str(Path(__file__).resolve().parent.parent)
         prof.CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -237,7 +238,12 @@ class Key2Touch(Adw.Application):
         self.win.add_controller(keys)
 
         self._setup_actions()
-        self.engine = EngineProc(self.on_engine)
+        # Restore whether mapping was on when the app was last closed.
+        enabled = self.settings.get("enabled", True)
+        self._syncing = True
+        self.enable_row.set_active(enabled)
+        self._syncing = False
+        self.engine = EngineProc(self.on_engine, enabled)
         self.load_into_ui()
         self._setup_tray()
         self._watch_profiles()
@@ -841,6 +847,9 @@ class Key2Touch(Adw.Application):
                 self._syncing = True
                 self.enable_row.set_active(msg["enabled"])
                 self._syncing = False
+            if not self.editor and self.settings.get("enabled", True) != msg["enabled"]:
+                self.settings["enabled"] = msg["enabled"]  # remembered for the next start
+                prof.save_settings(self.settings)
             if self.tray:
                 self.tray.refresh()
             self.refresh_status()
