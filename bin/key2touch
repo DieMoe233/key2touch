@@ -1,0 +1,6 @@
+#!/bin/sh
+# Launcher: keeps Python bytecode in ~/.cache/key2touch instead of the source tree.
+root=$(dirname "$(dirname "$(readlink -f "$0")")")
+export PYTHONPYCACHEPREFIX="${XDG_CACHE_HOME:-$HOME/.cache}/key2touch/pycache"
+export PYTHONPATH="$root${PYTHONPATH:+:$PYTHONPATH}"
+exec python3 -m key2touch "$@"
