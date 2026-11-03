@@ -61,6 +61,8 @@ key2touch profile use 原神            # 切换配置
 key2touch point add tap j 85% 78%    # 不开界面直接添加按键点
 key2touch point add stick 15% 70% --keys w,a,s,d
 key2touch set edit-hotkey ctrl+e     # 修改编辑热键
+key2touch windows                    # 游戏窗口在哪个显示器上
+key2touch check                      # 自检：越界、重叠、显示器不对、权限…
 ```
 
 所有命令都支持 `--json`，退出码固定（0 成功 / 1 错误 / 2 参数错误 / 3 未运行）。

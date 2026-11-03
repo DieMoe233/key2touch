@@ -86,10 +86,21 @@ class HyprlandBackend(Backend):
 
     def windows(self):
         try:
-            return [{"app_id": c.get("class"), "title": c.get("title") or ""}
+            mons = {m["id"]: m["name"] for m in request_json("monitors") or []}
+            focused = (request_json("activewindow") or {}).get("address")
+            return [{"app_id": c.get("class"), "title": c.get("title") or "",
+                     "output": mons.get(c.get("monitor")), "focused": c.get("address") == focused}
                     for c in request_json("clients") or []]
-        except (OSError, ValueError):
+        except (OSError, ValueError, KeyError, TypeError):
             return []
+
+    def outputs(self):
+        try:
+            # hyprctl reports pixels; logical size is pixels / scale.
+            return {m["name"]: {"width": round(m["width"] / m["scale"]), "height": round(m["height"] / m["scale"]),
+                                "scale": m["scale"]} for m in request_json("monitors") or []}
+        except (OSError, ValueError, KeyError, TypeError):
+            return super().outputs()
 
     def focused_output(self):
         try:

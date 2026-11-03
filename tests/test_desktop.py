@@ -45,9 +45,11 @@ class HyprlandTests(unittest.TestCase):
         self.commands = []
         self.events = threading.Event()
         replies = {
-            "j/clients": [{"class": "Waydroid", "title": "Waydroid"}, {"class": "firefox", "title": "x"}],
-            "j/monitors": [{"name": "eDP-1", "focused": False}, {"name": "DP-2", "focused": True}],
-            "j/activewindow": {"class": "firefox"},
+            "j/clients": [{"class": "Waydroid", "title": "Waydroid", "monitor": 1, "address": "0xa"},
+                          {"class": "firefox", "title": "x", "monitor": 0, "address": "0xb"}],
+            "j/monitors": [{"id": 0, "name": "eDP-1", "focused": False, "width": 2560, "height": 1440, "scale": 1.25},
+                           {"id": 1, "name": "DP-2", "focused": True, "width": 2560, "height": 1440, "scale": 1.0}],
+            "j/activewindow": {"class": "firefox", "address": "0xb"},
         }
 
         def req(conn):
@@ -74,7 +76,10 @@ class HyprlandTests(unittest.TestCase):
     def test_requests(self):
         b = hyprland.HyprlandBackend()
         self.assertTrue(b.available())
-        self.assertEqual([w["app_id"] for w in b.windows()], ["Waydroid", "firefox"])
+        wins = b.windows()
+        self.assertEqual([(w["app_id"], w["output"], w["focused"]) for w in wins],
+                         [("Waydroid", "DP-2", False), ("firefox", "eDP-1", True)])
+        self.assertEqual(b.outputs()["eDP-1"], {"width": 2048, "height": 1152, "scale": 1.25})
         self.assertEqual(b.focused_output(), "DP-2")
         b.touch_sync("DP-2")
         self.assertIn("keyword device[key2touch-virtual-touchscreen]:output DP-2", self.commands)
@@ -91,10 +96,13 @@ class HyprlandTests(unittest.TestCase):
 
 
 class SwayTests(unittest.TestCase):
-    TREE = {"nodes": [{"nodes": [
-        {"pid": 1, "app_id": "Waydroid", "name": "Waydroid", "focused": True},
-        {"pid": 2, "app_id": None, "window_properties": {"class": "Steam"}, "name": "Steam"},
-    ]}]}
+    TREE = {"nodes": [
+        {"type": "output", "name": "__i3", "nodes": []},
+        {"type": "output", "name": "DP-2", "nodes": [{"type": "workspace", "nodes": [
+            {"pid": 1, "app_id": "Waydroid", "name": "Waydroid", "focused": True},
+            {"pid": 2, "app_id": None, "window_properties": {"class": "Steam"}, "name": "Steam"},
+        ]}]},
+    ]}
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -116,7 +124,8 @@ class SwayTests(unittest.TestCase):
                 if t == sway.GET_TREE:
                     send(conn, t, self.TREE)
                 elif t == sway.GET_OUTPUTS:
-                    send(conn, t, [{"name": "DP-2", "focused": True}])
+                    send(conn, t, [{"name": "DP-2", "focused": True, "active": True, "scale": 1.5,
+                                    "rect": {"width": 1707, "height": 960}}])
                 elif t == sway.RUN_COMMAND:
                     self.commands.append(payload)
                     send(conn, t, [{"success": True}])
@@ -138,7 +147,8 @@ class SwayTests(unittest.TestCase):
     def test_requests(self):
         b = sway.SwayBackend()
         self.assertTrue(b.available())
-        self.assertEqual([w["app_id"] for w in b.windows()], ["Waydroid", "Steam"])
+        self.assertEqual([(w["app_id"], w["output"]) for w in b.windows()], [("Waydroid", "DP-2"), ("Steam", "DP-2")])
+        self.assertEqual(b.outputs(), {"DP-2": {"width": 1707, "height": 960, "scale": 1.5}})
         self.assertEqual(b.focused_output(), "DP-2")
         b.touch_sync("DP-2")
         self.assertEqual(self.commands, ['input "4617:1:key2touch_virtual_touchscreen" map_to_output DP-2'])

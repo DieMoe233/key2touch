@@ -30,7 +30,7 @@ KEY_ALIASES = {"LSHIFT": "LEFTSHIFT", "RSHIFT": "RIGHTSHIFT", "LCTRL": "LEFTCTRL
                "PGUP": "PAGEUP", "PGDN": "PAGEDOWN", "CAPS": "CAPSLOCK"}
 
 COMMANDS = {"on", "off", "toggle", "status", "edit", "show", "quit", "profiles", "profile",
-            "point", "set", "window", "agent-help"}
+            "point", "set", "window", "outputs", "windows", "check", "agent-help"}
 
 AGENT_HELP = """\
 # key2touch for AI agents
@@ -39,22 +39,40 @@ key2touch turns keyboard keys into touchscreen touches (for Android games in
 Waydroid). A profile is a list of points on one display; each point is a tap
 (one key) or a joystick (4 direction keys). Use `--json` on any command.
 
+## First: find the game's display
+Points are positioned relative to ONE display (the profile's `output`).
+Run `key2touch windows --json` to see which display the game window is on,
+then `key2touch set output <name>`. With several monitors this is the step
+that, if wrong, shifts every point.
+
 ## Coordinates
 x, y are fractions of the target display (0..1, origin top-left), or
-percentages like `80%`. To place a point on a game button seen in a screenshot
-of the whole display: x = pixel_x / width, y = pixel_y / height.
+percentages like `80%`. Measure them on a screenshot of the WHOLE display
+(e.g. `grim -o DP-2 shot.png`), not of the game window:
+x = pixel_x / image_width, y = pixel_y / image_height. This works at any
+scale factor. If the game is not fullscreen, its buttons move whenever the
+window moves, so prefer fullscreen (Waydroid: F11).
 `size` is a radius as a fraction of the display height (tap default 0.025,
 joystick default 0.12).
+
+## Verify
+`key2touch check -p NAME --json` reports errors (exit 1) and warnings:
+points out of range or overlapping, unbound keys, a display that does not
+exist, the game window sitting on a different display than the profile,
+missing permissions, compositor setup. Run it after every change.
 
 ## Keys
 Case-insensitive names: `j`, `space`, `enter`, `esc`, `f1`, `up`, `lshift`,
 `kp1` ... Combos join modifiers with `+`: `ctrl+q`, `alt+shift+1`.
 
 ## Typical session
+    key2touch windows --json                 # which display is the game on?
     key2touch profile new genshin            # empty profile
+    key2touch set output DP-2 -p genshin
     key2touch point add tap j 85% 78% -p genshin
     key2touch point add stick 15% 70% --keys w,a,s,d --size 0.13 -p genshin
     key2touch point list -p genshin --json
+    key2touch check -p genshin --json        # fix every error it reports
     key2touch set only-focused true -p genshin
     key2touch window add 'waydroid.*' -p genshin
     key2touch profile use genshin            # needs the app running
@@ -69,6 +87,9 @@ Case-insensitive names: `j`, `space`, `enter`, `esc`, `f1`, `up`, `lshift`,
     point list|add|set|rm|clear         edit points (index from `point list`)
     set output|hotkey|edit-hotkey|grab|only-focused VALUE   (hotkeys: e.g. ctrl+f12, or none)
     window list|add|rm [PATTERN]        app_id rules for only-focused (* wildcards)
+    outputs                             displays: name, logical size, scale, focused
+    windows                             open windows: app_id, title, display, rule match
+    check                               validate a profile against the live desktop
 
 Exit codes: 0 ok, 1 error, 2 bad usage, 3 not running.
 Profiles are JSON files in ~/.config/key2touch/profiles/; `profile export`
@@ -481,6 +502,12 @@ def cmd_point(args, out):
 
 
 def cmd_set(args, out):
+    if args.option == "output" and not args.force:
+        outs = _backend().outputs()
+        if outs and args.value not in outs:
+            raise CliError(f"没有名为 {args.value} 的显示器（可用：{', '.join(sorted(outs))}；"
+                           "确定要用就加 --force）")
+
     def change(p):
         if args.option == "output":
             p["output"] = args.value
@@ -524,6 +551,128 @@ def cmd_window(args, out):
     name, p, _ = _edit(args, change)
     out.emit(p["windows"], "\n".join(p["windows"]) or "（没有规则）")
     return 0
+
+
+# ---------------------------------------------------------------- desktop queries
+def _backend():
+    from . import desktop
+    return desktop.detect()
+
+
+def cmd_outputs(args, out):
+    b = _backend()
+    focused = b.focused_output()
+    items = [{"name": n, **geo, "focused": n == focused} for n, geo in sorted(b.outputs().items())]
+    out.emit(items, "\n".join(
+        f"{'*' if it['focused'] else ' '} {it['name']}" +
+        (f"  {it['width']}×{it['height']} @{it['scale']:g}x" if "width" in it else "") for it in items))
+    return 0
+
+
+def _rules(args):
+    try:
+        return prof.load(target_profile(args))["windows"]
+    except CliError:
+        return []
+
+
+def cmd_windows(args, out):
+    from .engine import window_matches
+    b = _backend()
+    rules = _rules(args)
+    items = [{**w, "matches_rules": window_matches(w["app_id"], rules)} for w in b.windows()]
+    out.emit(items, "\n".join(
+        f"{'*' if w.get('focused') else ' '} {w['app_id']}  [{w.get('output') or '?'}]"
+        f"{'  ← 匹配规则' if w['matches_rules'] else ''}  {w['title'][:40]}" for w in items)
+        or f"（{b.label} 无法列出窗口）")
+    return 0
+
+
+def check_profile(name, p, b):
+    """-> list of {"level": "error"|"warning", "code", "message", ...}"""
+    import os
+    from .engine import window_matches
+    issues = []
+
+    def add(level, code, message, **extra):
+        issues.append({"level": level, "code": code, "message": message, **extra})
+
+    outs = b.outputs()
+    geo = outs.get(p["output"]) or {}
+    if not p["output"]:
+        add("error", "no_output", "没有设置显示器（key2touch set output <名字>）")
+    elif outs and p["output"] not in outs:
+        add("error", "output_missing", f"显示器 {p['output']} 不存在（可用：{', '.join(sorted(outs))}）")
+    aspect = geo["width"] / geo["height"] if geo.get("width") else 16 / 9
+
+    windows = b.windows()
+    matching = [w for w in windows if window_matches(w["app_id"], p["windows"])]
+    for w in matching:
+        if w.get("output") and p["output"] and w["output"] != p["output"]:
+            add("error", "window_on_other_output",
+                f"匹配的窗口 {w['app_id']} 在 {w['output']} 上，但配置的显示器是 {p['output']}",
+                app_id=w["app_id"], window_output=w["output"])
+    if p.get("only_focused"):
+        if not b.supports_focus:
+            add("warning", "no_focus_tracking", f"{b.label} 无法获取窗口焦点，「仅聚焦指定窗口时生效」不起作用")
+        elif not p["windows"]:
+            add("warning", "no_window_rules", "开启了仅聚焦指定窗口时生效，但没有窗口规则（等于不限制）")
+        elif windows and not matching:
+            add("warning", "no_matching_window", "没有打开的窗口匹配窗口规则（游戏还没开？）")
+
+    pts = p["points"]
+    if not pts:
+        add("warning", "no_points", "没有按键点")
+    for i, q in enumerate(pts):
+        r = q.get("r", prof.TAP_R if q["type"] == "tap" else 0.12)
+        if not (0 <= q["x"] <= 1 and 0 <= q["y"] <= 1):
+            add("error", "out_of_range", f"第 {i} 个按键点坐标越界：({q['x']}, {q['y']})", point=i)
+            continue
+        rx = r / aspect
+        if q["x"] - rx < 0 or q["x"] + rx > 1 or q["y"] - r < 0 or q["y"] + r > 1:
+            add("warning", "partly_offscreen", f"第 {i} 个按键点的范围超出了屏幕边缘", point=i)
+        if q["type"] == "tap" and not q.get("key"):
+            add("warning", "unbound", f"第 {i} 个按键点没有绑定按键", point=i)
+        if q["type"] == "joystick" and not all(q["keys"].get(d) for d in JOY_DIRS):
+            add("warning", "unbound", f"第 {i} 个摇杆有方向没有绑定按键", point=i)
+    for i in range(len(pts)):
+        for j in range(i + 1, len(pts)):
+            a, c = pts[i], pts[j]
+            ra = a.get("r", prof.TAP_R if a["type"] == "tap" else 0.12)
+            rc = c.get("r", prof.TAP_R if c["type"] == "tap" else 0.12)
+            dist = (((a["x"] - c["x"]) * aspect) ** 2 + (a["y"] - c["y"]) ** 2) ** 0.5
+            if dist < ra + rc:
+                kind = "inside" if dist < max(ra, rc) else "overlap"
+                add("warning", f"points_{kind}",
+                    f"第 {i} 和第 {j} 个按键点" + ("一个的中心落在另一个范围内" if kind == "inside" else "范围重叠"),
+                    points=[i, j])
+
+    if not os.access("/dev/uinput", os.W_OK):
+        add("error", "uinput_denied", "没有 /dev/uinput 写权限（安装包会带 udev 规则；或检查 uinput 模块）")
+    events = glob_events()
+    if events and not any(os.access(ev, os.R_OK) for ev in events):
+        add("error", "input_denied", "读不了 /dev/input/event*：把用户加入 input 组后重新登录")
+    notice = b.notice(p["output"], len(outs))
+    if notice:
+        add("warning", "desktop_setup", notice[0])
+    return issues
+
+
+def glob_events():
+    import glob
+    return glob.glob("/dev/input/event*")
+
+
+def cmd_check(args, out):
+    name = target_profile(args)
+    p = prof.load(name)
+    issues = check_profile(name, p, _backend())
+    errors = [x for x in issues if x["level"] == "error"]
+    data = {"profile": name, "ok": not errors, "errors": errors,
+            "warnings": [x for x in issues if x["level"] == "warning"]}
+    lines = [f"{'✗' if x['level'] == 'error' else '!'} {x['message']}" for x in issues]
+    out.emit(data, "\n".join(lines) if lines else f"✓ 「{name}」没有发现问题")
+    return EXIT_ERR if errors else 0
 
 
 # ---------------------------------------------------------------- argparse
@@ -593,6 +742,11 @@ def build_parser():
     p = sp.add_parser("set", help="修改配置选项", parents=[common, target])
     p.add_argument("option", choices=["output", "hotkey", "edit-hotkey", "grab", "only-focused"])
     p.add_argument("value")
+    p.add_argument("--force", action="store_true", help="output：不检查显示器是否存在")
+
+    sp.add_parser("outputs", help="列出显示器", parents=[common])
+    sp.add_parser("windows", help="列出窗口及其所在显示器", parents=[common, target])
+    sp.add_parser("check", help="自检配置（越界、重叠、显示器、权限…）", parents=[common, target])
 
     p = sp.add_parser("window", help="仅聚焦指定窗口时生效的匹配规则", parents=[common, target])
     p.add_argument("sub", choices=["list", "add", "rm"])
@@ -612,7 +766,8 @@ def main(argv):
             return cmd_control(args, out)
         if args.cmd == "profiles":
             return cmd_profiles(args, out)
-        handler = {"profile": cmd_profile, "point": cmd_point, "set": cmd_set, "window": cmd_window}[args.cmd]
+        handler = {"profile": cmd_profile, "point": cmd_point, "set": cmd_set, "window": cmd_window,
+                   "outputs": cmd_outputs, "windows": cmd_windows, "check": cmd_check}[args.cmd]
         if args.cmd in ("profile", "point") and not getattr(args, "sub", None):
             ap.parse_args([args.cmd, "--help"])
         if args.cmd == "point" and args.sub == "add" and not args.kind:

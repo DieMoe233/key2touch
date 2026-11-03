@@ -104,9 +104,22 @@ class SwayBackend(Backend):
 
     def windows(self):
         try:
-            return [{"app_id": _app_id(c), "title": c.get("name") or ""} for c in _leaves(request(GET_TREE))]
-        except (OSError, EOFError, ValueError):
+            out = []
+            for o in request(GET_TREE).get("nodes", []):
+                if o.get("type") != "output" or o.get("name", "").startswith("__"):
+                    continue
+                out += [{"app_id": _app_id(c), "title": c.get("name") or "", "output": o["name"],
+                         "focused": c.get("focused", False)} for c in _leaves(o)]
+            return out
+        except (OSError, EOFError, ValueError, KeyError):
             return []
+
+    def outputs(self):
+        try:
+            return {o["name"]: {"width": o["rect"]["width"], "height": o["rect"]["height"], "scale": o.get("scale", 1)}
+                    for o in request(GET_OUTPUTS) if o.get("active")}
+        except (OSError, EOFError, ValueError, KeyError):
+            return super().outputs()
 
     def focused_output(self):
         try:

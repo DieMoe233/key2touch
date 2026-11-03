@@ -11,6 +11,7 @@ libinput).  A backend only supplies the extras:
 Outputs themselves come from GDK in the GUI, which works everywhere.
 """
 
+import glob
 import os
 
 # Every IPC socket gets a timeout: the engine may hold the keyboard grab while
@@ -30,8 +31,22 @@ class Backend:
 
     # ---- GUI side ----
     def windows(self):
-        """[{'app_id': str, 'title': str}]"""
+        """[{'app_id': str, 'title': str, 'output': str | None}]"""
         return []
+
+    def outputs(self):
+        """name -> {'width', 'height', 'scale'} in logical pixels (empty dict if unknown).
+
+        Generic fallback: connected DRM connectors from sysfs, which carry the
+        same names Wayland compositors use (DP-2, eDP-1, HDMI-A-1 ...)."""
+        out = {}
+        for status in glob.glob("/sys/class/drm/card*-*/status"):
+            try:
+                if open(status).read().strip() == "connected":
+                    out[os.path.basename(os.path.dirname(status)).split("-", 1)[1]] = {}
+            except OSError:
+                pass
+        return out
 
     def focused_output(self):
         return None

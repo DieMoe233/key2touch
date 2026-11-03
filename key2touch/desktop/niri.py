@@ -187,10 +187,19 @@ class NiriBackend(Backend):
 
     def windows(self):
         try:
-            return [{"app_id": w.get("app_id"), "title": w.get("title") or ""}
+            ws_out = {w["id"]: w.get("output") for w in request("Workspaces")["Workspaces"]}
+            return [{"app_id": w.get("app_id"), "title": w.get("title") or "",
+                     "output": ws_out.get(w.get("workspace_id")), "focused": w.get("is_focused", False)}
                     for w in request("Windows")["Windows"]]
-        except (OSError, RuntimeError):
+        except (OSError, RuntimeError, KeyError):
             return []
+
+    def outputs(self):
+        try:
+            return {n: {"width": o["width"], "height": o["height"], "scale": o["scale"]}
+                    for n, o in outputs().items()}
+        except (OSError, RuntimeError, KeyError):
+            return super().outputs()
 
     def focused_output(self):
         try:
