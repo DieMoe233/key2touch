@@ -53,6 +53,11 @@ def raise_priority():
     return "normal"
 
 
+def log(msg):
+    """One line per state change in ~/.cache/key2touch/engine.log (stderr)."""
+    print(time.strftime("%H:%M:%S"), msg, file=sys.stderr, flush=True)
+
+
 def window_matches(app_id, rules):
     """Shell-style, case-insensitive: "Waydroid", "waydroid.*" ..."""
     if not app_id:
@@ -388,6 +393,7 @@ class Engine:
                     self.emit(ev="hotkey", action="edit")  # the GUI opens / closes the editor
                     continue
                 self.enabled = not self.enabled
+                log(f"mapping {'on' if self.enabled else 'off'}: hotkey {e.KEY.get(code)} on {dev.name!r}")
                 self.emit(ev="toggled", enabled=self.enabled)  # the GUI notifies the user
                 if pass_dirty:
                     self.passthru.syn()
@@ -441,6 +447,8 @@ class Engine:
             elif cmd == "hotkeys":
                 self.hotkeys_on = bool(msg["on"])
             elif cmd == "enable":
+                if bool(msg["on"]) != self.enabled:
+                    log(f"mapping {'on' if msg['on'] else 'off'}: from GUI ({msg.get('why', 'switch')})")
                 self.enabled = bool(msg["on"])
                 self.update_active()
             elif cmd == "quit":

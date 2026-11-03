@@ -808,7 +808,7 @@ class Key2Touch(Adw.Application):
     def _on_enable(self, row, _):
         # While editing the engine stays off; editor_done() applies this switch.
         if not self._syncing and not self.editor:
-            self.engine.send(cmd="enable", on=row.get_active())
+            self.engine.send(cmd="enable", on=row.get_active(), why="switch / tray / CLI")
         self.publish_state()
 
     def on_engine(self, msg):
@@ -890,7 +890,7 @@ class Key2Touch(Adw.Application):
     def on_edit(self, *_):
         if self.editor:
             return
-        self.engine.send(cmd="enable", on=False)
+        self.engine.send(cmd="enable", on=False, why="editor opened")
         if self.hud:
             self.hud.close()
             self.hud = None
@@ -904,7 +904,7 @@ class Key2Touch(Adw.Application):
         self.editor = None
         if not save:
             self.profile = backup
-        self.engine.send(cmd="enable", on=self.enable_row.get_active())
+        self.engine.send(cmd="enable", on=self.enable_row.get_active(), why="editor closed")
         try:
             self.load_into_ui()
         except OSError as ex:
