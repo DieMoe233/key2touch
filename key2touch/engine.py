@@ -262,7 +262,7 @@ class Engine:
             for dev in self.mice.values():
                 self.try_grab_mouse(dev)
         else:
-            self.mapper.look and self.mapper.look.release()
+            self.mapper.look and self.mapper.look.reset()
             for code in [c for c in self.mapper.fired if e.BTN_MISC <= c < e.KEY_OK]:
                 idx = self.mapper.key(code, 0)  # mouse-button taps
                 if idx is not None:
@@ -314,7 +314,7 @@ class Engine:
         rules = self.profile.get("windows") or []
         if self.focus_src and self.profile.get("only_focused", False) and rules:
             focus_ok = window_matches(self.focus_app, rules)
-        active = self.enabled and focus_ok and bool(self.mapper.bindings)
+        active = self.enabled and focus_ok and bool(self.mapper.bindings or self.mapper.look)
         if active != self.active:
             self.active = active
             if not active:

@@ -690,6 +690,10 @@ def check_profile(name, p, b):
         if q["x"] - rx < 0 or q["x"] + rx > 1 or q["y"] - r < 0 or q["y"] + r > 1:
             add("warning", "partly_offscreen", f"第 {i} 个按键点的范围超出了屏幕边缘", point=i)
         if q["type"] == "look":
+            if r < 0.1:
+                add("warning", "look_too_small",
+                    f"第 {i} 个视角区域太小（size {r:.2f}）：手指很快到边缘、频繁重新按下，转视角会一顿一顿；建议 ≥ 0.15",
+                    point=i)
             continue
         if q["type"] == "tap" and not q.get("key"):
             add("warning", "unbound", f"第 {i} 个按键点没有绑定按键", point=i)

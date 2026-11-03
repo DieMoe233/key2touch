@@ -91,7 +91,17 @@ LOOK_IDLE = 0.3  # seconds without mouse motion before the camera finger lifts
 
 
 class Look:
-    """Mouse motion → a dragging finger, re-centred at the edge of its area."""
+    """Mouse motion → a dragging finger, restarted when it reaches the edge.
+
+    Restarting is the delicate part: Android hands the new finger the same
+    pointer id, so if the lift and the new press land in one game frame the
+    game sees that pointer *jump* back across the area and the camera jerks.
+    So after lifting we wait a couple of frames (buffering the motion), and
+    start the next stroke on the far side of the area to make each stroke as
+    long as possible."""
+
+    GAP = 0.02  # s between lift and the next press: just over one 60 fps frame
+    RESTART = 0.7  # next stroke starts this fraction of r behind the centre
 
     def __init__(self, touch, pt, aspect):
         self.touch, self.cx, self.cy = touch, pt["x"], pt["y"]
@@ -101,35 +111,78 @@ class Look:
         self.slot = None
         self.ox = self.oy = 0.0  # finger offset from the centre, in height units
         self.last = 0.0
+        self.resume_at = None  # set while waiting between strokes
+        self.px = self.py = 0.0  # motion buffered during that wait
 
     def motion(self, dx, dy, now):
         """dx, dy: mouse counts accumulated over one read batch."""
         if not dx and not dy:
             return
         self.last = now
-        mx, my = dx * self.k, dy * self.k
-        if self.slot is not None and (self.ox + mx) ** 2 + (self.oy + my) ** 2 > self.r ** 2:
-            self.release()  # about to leave the area: lift, and start over at the centre
+        self.px += dx * self.k
+        self.py += dy * self.k
+        self._flush(now)
+
+    def _flush(self, now):
+        restart = False
+        if self.resume_at is not None:
+            if now < self.resume_at:
+                return  # still in the gap: keep buffering
+            self.resume_at = None
+            restart = True
+        mx, my, self.px, self.py = self.px, self.py, 0.0, 0.0
+        if not mx and not my:
+            return
         if self.slot is None:
-            self.ox = self.oy = 0.0
-            self.slot = self.touch.down(self.cx, self.cy)
+            n = math.hypot(mx, my)
+            if restart:  # begin behind the centre, opposite to the motion
+                self.ox, self.oy = -mx / n * self.r * self.RESTART, -my / n * self.r * self.RESTART
+            else:
+                self.ox = self.oy = 0.0
+            self.slot = self.touch.down(self.cx + self.ox / self.aspect, self.cy + self.oy)
             if self.slot is None:
                 return
-        self.ox = max(-self.r, min(self.r, self.ox + mx))
-        self.oy = max(-self.r, min(self.r, self.oy + my))
-        self.touch.move(self.slot, self.cx + self.ox / self.aspect, self.cy + self.oy)
+        nx, ny = self.ox + mx, self.oy + my
+        if nx * nx + ny * ny <= self.r * self.r:
+            self._to(nx, ny)
+            return
+        # Crosses the edge: go exactly to it, lift, and carry the rest over to
+        # the next stroke — no motion is lost however small the area is.
+        a = mx * mx + my * my
+        b = 2 * (self.ox * mx + self.oy * my)
+        c = self.ox * self.ox + self.oy * self.oy - self.r * self.r
+        t = max(0.0, min(1.0, (-b + math.sqrt(max(0.0, b * b - 4 * a * c))) / (2 * a)))
+        self._to(self.ox + t * mx, self.oy + t * my)
+        self.release()
+        self.resume_at = now + self.GAP
+        self.px, self.py = (1 - t) * mx, (1 - t) * my
+
+    def _to(self, ox, oy):
+        self.ox, self.oy = ox, oy
+        self.touch.move(self.slot, self.cx + ox / self.aspect, self.cy + oy)
 
     def idle(self, now):
+        if self.resume_at is not None:
+            self._flush(now)
+            return
         if self.slot is not None and now - self.last >= LOOK_IDLE:
             self.release()
 
     def deadline(self):
+        if self.resume_at is not None:
+            return self.resume_at
         return self.last + LOOK_IDLE if self.slot is not None else None
 
     def release(self):
         if self.slot is not None:
             self.touch.up(self.slot)
             self.slot = None
+
+    def reset(self):
+        """Stop entirely (camera mode left): no pending stroke."""
+        self.release()
+        self.resume_at = None
+        self.px = self.py = 0.0
 
 
 class Mapper:
@@ -200,4 +253,4 @@ class Mapper:
     def release_all(self):
         self.fired.clear()
         for c in self.controls:
-            c.release()
+            c.reset() if isinstance(c, Look) else c.release()

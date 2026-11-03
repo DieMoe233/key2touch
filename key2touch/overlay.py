@@ -24,7 +24,7 @@ DIR_ANGLE = {"up": -90, "right": 0, "down": 90, "left": 180}
 DIR_ARROW = {"up": "↑", "left": "←", "down": "↓", "right": "→"}
 MOD_NAME_GROUP = {e.KEY[c]: g for c, g in MOD_GROUP.items()}
 MOD_LABEL = {"CTRL": "Ctrl", "ALT": "Alt", "SHIFT": "Shift", "META": "Super"}
-SIZE_RANGE = {"tap": (0.008, 0.1), "joystick": (0.03, 0.45), "look": (0.05, 0.45)}
+SIZE_RANGE = {"tap": (0.008, 0.1), "joystick": (0.03, 0.45), "look": (0.1, 0.45)}  # a small camera area restarts its stroke very often
 MOUSE_LABELS = {"BTN_LEFT": "左键", "BTN_RIGHT": "右键", "BTN_MIDDLE": "中键",
                 "BTN_SIDE": "侧键1", "BTN_EXTRA": "侧键2"}
 # GDK button number -> evdev code, for binding mouse buttons by clicking.

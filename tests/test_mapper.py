@@ -176,11 +176,33 @@ class LookTests(unittest.TestCase):
         # 20 counts * 0.001 = 0.02 height = 0.01 width at aspect 2
         self.assertEqual(self.t.log[1], ("move", 0, 0.61, 0.39))
 
-    def test_recentre_at_edge(self):
-        self.look.motion(90, 0, now=1.0)
-        self.look.motion(30, 0, now=1.01)  # would pass r=0.1: lift, start again at the centre
-        self.assertEqual([l[0] for l in self.t.log], ["down", "move", "up", "down", "move"])
-        self.assertEqual(self.t.log[-1], ("move", 1, 0.615, 0.4))
+    def test_restart_at_edge(self):
+        self.look.motion(90, 0, now=1.0)  # 0.09 of r=0.1
+        self.look.motion(30, 0, now=1.01)  # crosses the edge after 10 of the 30 counts
+        self.assertEqual([l[0] for l in self.t.log], ["down", "move", "move", "up"])
+        self.assertAlmostEqual(self.t.log[2][2], 0.6 + 0.1 / 2, places=3)  # exactly at the edge
+        self.look.motion(10, 0, now=1.02)  # buffered during the gap
+        self.assertEqual(len(self.t.log), 4)
+        self.assertEqual(self.look.deadline(), 1.01 + self.look.GAP)
+        self.look.idle(now=1.05)  # gap over: new stroke behind the centre, carrying 20 + 10 counts
+        self.assertEqual(self.t.log[4][0], "down")
+        self.assertAlmostEqual(self.t.log[4][2], 0.6 - 0.07 / 2, places=3)
+        self.assertAlmostEqual(self.t.log[5][2], 0.6 + (-0.07 + 0.03) / 2, places=3)
+
+    def test_no_motion_lost(self):
+        # A long sweep through a small area: total finger travel == mouse travel.
+        for i in range(200):
+            self.look.motion(10, 0, now=1.0 + i * 0.01)
+            self.look.idle(now=1.0 + i * 0.01)
+        self.look.idle(now=10)
+        xs, travel, prev = [], 0.0, None
+        for entry in self.t.log:
+            if entry[0] == "down":
+                prev = entry[2]
+            elif entry[0] == "move":
+                travel += entry[2] - prev
+                prev = entry[2]
+        self.assertAlmostEqual(travel * 2, 200 * 10 * 0.001, places=2)  # back to height units
 
     def test_idle_lift(self):
         self.look.motion(5, 5, now=1.0)
