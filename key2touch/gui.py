@@ -240,6 +240,7 @@ class Key2Touch(Adw.Application):
         self.engine = EngineProc(self.on_engine)
         self.load_into_ui()
         self._setup_tray()
+        self._watch_profiles()
         if not (self.start_hidden and self.tray):
             self.win.present()
 
@@ -425,15 +426,45 @@ class Key2Touch(Adw.Application):
         self.state_action.set_enabled(False)
         self.add_action(self.state_action)
 
-    def _reload_from_disk(self):
-        """The CLI changed profile files; pick up the change (not mid-edit)."""
-        if self.editor:
-            return
+    def _watch_profiles(self):
+        """Profiles may change behind our back (CLI, an AI agent, a text
+        editor): watch the directory instead of relying on being told."""
+        prof.PROFILE_DIR.mkdir(parents=True, exist_ok=True)
+        self.prof_monitor = Gio.File.new_for_path(str(prof.PROFILE_DIR)).monitor_directory(
+            Gio.FileMonitorFlags.WATCH_MOVES, None)
+        self.prof_monitor.connect("changed", lambda *_: self._schedule_reload())
+        self._reload_pending = False
+
+    def _schedule_reload(self):
+        # Saves arrive as several events (temp file + rename): coalesce them.
+        if not self._reload_pending:
+            self._reload_pending = True
+            GLib.timeout_add(250, self._reload_from_disk)
+
+    def _reload_from_disk(self, *_):
+        self._reload_pending = False
         names = prof.list_profiles()
-        if self.name in names:
-            self.switch_profile(self.name)
-        elif names:
+        if self.name not in names:
+            if self.editor:
+                return False  # the editor still holds it; it is saved back on exit
+            if not names:
+                prof.save("默认", prof.normalize({"output": self.profile["output"]}))
+                names = ["默认"]
             self.switch_profile(names[0])
+            return False
+        if not self.editor:
+            try:
+                disk = prof.load(self.name)
+            except (OSError, ValueError):
+                disk = self.profile  # half-written or broken file: keep what we have
+            # Our own saves land here too; only reload real outside changes
+            # (comparing content also prevents a save → reload → save loop).
+            if disk != self.profile:
+                self.profile = disk
+                self.load_into_ui()
+                return False
+        self.reload_profile_list()
+        return False
 
     def _on_profile_action(self, action, value):
         name = value.get_string()
