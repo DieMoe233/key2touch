@@ -81,6 +81,7 @@ class Engine:
         self.touch = TouchScreen()
         self.passthru = None  # virtual keyboard, created on first grab
         self.pass_down = {}  # fd -> keycodes currently held via the passthrough device
+        self.dev_down = {}  # fd -> every keycode currently held on that device
         self.kbds = {}  # fd -> InputDevice
         self.paths = set()
         self.want_grab = False
@@ -148,9 +149,14 @@ class Engine:
             self.passthru.write(e.EV_KEY, code, 0)
         if held:
             self.passthru.syn()
-        self.mapper.release_all()
-        self.mapper.mods_down.clear()
-        self.hotkey_down.clear()
+        # Only what *this* device held: another keyboard (e.g. Sunshine's
+        # virtual one) coming and going must not cut the player's touches.
+        for code in self.dev_down.pop(fd, set()):
+            self.mapper.track(code, 0)
+            idx = self.mapper.key(code, 0)
+            if idx is not None:
+                self.emit(ev="key", code=code, idx=idx, down=False)
+            self.hotkey_down.discard(code)
         if dev:
             try:
                 dev.close()
@@ -257,6 +263,10 @@ class Engine:
                 continue
             code, val = ev.code, ev.value
             self.mapper.track(code, val)
+            if val == 1:
+                self.dev_down.setdefault(dev.fd, set()).add(code)
+            elif val == 0:
+                self.dev_down.get(dev.fd, set()).discard(code)
             if code in self.hotkey_down and val != 1:
                 if val == 0:
                     self.hotkey_down.discard(code)
