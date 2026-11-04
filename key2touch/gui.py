@@ -20,7 +20,7 @@ gi.require_version("Gdk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Adw, Gdk, Gio, GLib, Gtk  # noqa: E402
 
-from . import desktop, profile as prof, tray  # noqa: E402
+from . import desktop, perms, profile as prof, tray  # noqa: E402
 from .mapper import MOD_ORDER  # noqa: E402
 from .overlay import MOD_LABEL, MOD_NAME_GROUP, LS, Overlay, combo_label, key_name  # noqa: E402
 
@@ -85,6 +85,16 @@ class EngineProc:
             self.p.wait(2)
         except subprocess.TimeoutExpired:
             self.p.kill()
+
+
+class NullEngine:
+    """Stands in until the session may read keyboards; every command is dropped."""
+
+    def send(self, **msg):
+        pass
+
+    def stop(self):
+        pass
 
 
 def gdk_outputs():
@@ -228,7 +238,12 @@ class Key2Touch(Adw.Application):
         box.append(self._build_output_group())
         box.append(self._build_footer())
         clamp = Adw.Clamp(maximum_size=520, child=box)
-        view.set_content(Gtk.ScrolledWindow(child=clamp, hscrollbar_policy=Gtk.PolicyType.NEVER))
+        # Without input permissions nothing on the main page can work, so a
+        # setup page takes its place until the group membership is in effect.
+        self.stack = Gtk.Stack(transition_type=Gtk.StackTransitionType.CROSSFADE)
+        self.stack.add_named(Gtk.ScrolledWindow(child=clamp, hscrollbar_policy=Gtk.PolicyType.NEVER), "main")
+        self.stack.add_named(self._build_perm_page(), "perm")
+        view.set_content(self.stack)
         self.toasts.set_child(view)
         self.win.set_content(self.toasts)
 
@@ -243,12 +258,100 @@ class Key2Touch(Adw.Application):
         self._syncing = True
         self.enable_row.set_active(enabled)
         self._syncing = False
-        self.engine = EngineProc(self.on_engine, enabled)
+        self.engine = NullEngine()
         self.load_into_ui()
+        ready = self.refresh_perms()  # starts the engine when access works
         self._setup_tray()
         self._watch_profiles()
-        if not (self.start_hidden and self.tray):
-            self.win.present()
+        if not (self.start_hidden and self.tray and ready):
+            self.win.present()  # a missing permission must not stay hidden in the tray
+
+    # ---- input permissions ----
+    def _build_perm_page(self):
+        self.perm_page = Adw.StatusPage(icon_name="dialog-password-symbolic")
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18, halign=Gtk.Align.CENTER)
+        self.perm_btn = Gtk.Button(halign=Gtk.Align.CENTER)
+        self.perm_btn.add_css_class("pill")
+        self.perm_btn.add_css_class("suggested-action")
+        self.perm_btn.add_css_class("key2touch-hero")
+        self.perm_btn.connect("clicked", self._on_perm_btn)
+        box.append(self.perm_btn)
+        recheck = Gtk.Button(label="重新检测", halign=Gtk.Align.CENTER)
+        recheck.add_css_class("flat")
+        recheck.connect("clicked", lambda *_: self.refresh_perms() and self.toast("权限已就绪"))
+        self.perm_recheck = recheck
+        box.append(recheck)
+        self.perm_manual = Gtk.Label(wrap=True, selectable=True, justify=Gtk.Justification.CENTER, use_markup=True)
+        self.perm_manual.add_css_class("dim-label")
+        self.perm_manual.add_css_class("caption")
+        box.append(self.perm_manual)
+        self.perm_page.set_child(box)
+        return self.perm_page
+
+    def refresh_perms(self):
+        """Show the setup page while access is missing; start the engine once it works."""
+        st = perms.status()
+        self.perm = st
+        ok = st == perms.OK
+        self.stack.set_visible_child_name("main" if ok else "perm")
+        self.prof_dd.set_visible(ok)
+        self.menu_btn.set_visible(ok)
+        if ok:
+            if isinstance(self.engine, NullEngine):
+                self.engine = EngineProc(self.on_engine, self.settings.get("enabled", True))
+                self.apply()
+            return True
+        user = GLib.markup_escape_text(perms.user())
+        manual = f"也可以在终端里运行：<tt>{GLib.markup_escape_text(perms.manual_cmd())}</tt>"
+        if st == perms.NEED_GROUP:
+            self.perm_page.set_title("需要输入设备权限")
+            self.perm_page.set_description(
+                "key2touch 要读取键盘、创建虚拟触摸屏，需要把你的账户加入 <b>input</b> 组。\n"
+                "加入后，同一账户下运行的程序都能读取键盘输入。")
+            self.perm_btn.set_label("加入 input 组")
+            self.perm_btn.set_visible(True)
+            self.perm_manual.set_label(manual + "，然后重新登录。")
+        elif st == perms.RELOGIN:
+            self.perm_page.set_icon_name("system-log-out-symbolic")
+            self.perm_page.set_title("重新登录后生效")
+            self.perm_page.set_description(
+                f"已把 <b>{user}</b> 加入 input 组。\n注销并重新登录桌面后，再打开 key2touch。")
+            self.perm_btn.set_visible(False)
+            self.perm_manual.set_label("")
+        else:
+            self.perm_page.set_icon_name("dialog-warning-symbolic")
+            self.perm_page.set_title("无法访问 /dev/uinput")
+            self.perm_page.set_description("已经在 input 组里，但 uinput 模块没加载，或者 udev 规则还没生效。")
+            self.perm_btn.set_label("修复")
+            self.perm_btn.set_visible(True)
+            self.perm_manual.set_label("仍然不行的话，运行 <tt>key2touch check</tt> 查看原因。")
+        return False
+
+    def _on_perm_btn(self, *_):
+        cmd = perms.grant_cmd() if self.perm == perms.NEED_GROUP else perms.repair_cmd()
+        self.perm_btn.set_sensitive(False)
+        try:
+            proc = Gio.Subprocess.new(cmd, Gio.SubprocessFlags.STDERR_PIPE)
+        except GLib.Error:
+            self.perm_btn.set_sensitive(True)
+            self.toast("找不到 pkexec，请在终端里运行下面的命令")
+            return
+
+        def done(p, res):
+            self.perm_btn.set_sensitive(True)
+            _, _, err = p.communicate_utf8_finish(res)
+            code = p.get_exit_status()
+            if code == 0:
+                self.refresh_perms()
+            elif code == 126:
+                self.toast("已取消")
+            elif code == 127:
+                # No polkit agent (common on bare compositors) or not authorized.
+                self.toast("没能获得授权：请在终端里运行下面的命令")
+            else:
+                self.toast(f"失败：{(err or '').strip() or code}")
+
+        proc.communicate_utf8_async(None, None, done)
 
     def do_shutdown(self):
         if self.tray:
@@ -304,7 +407,8 @@ class Key2Touch(Adw.Application):
         menu.append("复制当前配置…", "app.dup-profile")
         menu.append("重命名…", "app.rename-profile")
         menu.append("删除当前配置…", "app.delete-profile")
-        hb.pack_end(Gtk.MenuButton(icon_name="open-menu-symbolic", menu_model=menu, tooltip_text="配置管理"))
+        self.menu_btn = Gtk.MenuButton(icon_name="open-menu-symbolic", menu_model=menu, tooltip_text="配置管理")
+        hb.pack_end(self.menu_btn)
 
         return hb
 

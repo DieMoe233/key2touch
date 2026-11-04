@@ -32,7 +32,7 @@
 yay -S key2touch-git
 ```
 
-用户需要在 `input` 组里：`sudo usermod -aG input $USER`，然后重新登录。
+用户需要在 `input` 组里。不在组里时主界面会显示引导页，点「加入 input 组」通过 pkexec 授权即可；也可以手动运行 `sudo usermod -aG input $USER`。加入后要重新登录才生效。
 
 <details>
 <summary>从源码运行</summary>
