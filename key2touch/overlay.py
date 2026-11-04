@@ -17,14 +17,15 @@ from gi.repository import Gdk, GLib, Gtk, Gtk4LayerShell as LS  # noqa: E402
 from evdev import ecodes as e  # noqa: E402
 
 from .mapper import MOD_GROUP, MOD_ORDER  # noqa: E402
-from .profile import JOY_DIRS, LOOK_MIN_R, TAP_R, new_joystick, new_look, new_tap  # noqa: E402
+from .profile import JOY_DIRS, KEYED, LOOK_MIN_R, SKILL_BTN, SKILL_R, TAP_R, new_joystick, new_look, new_skill, new_tap  # noqa: E402
 
 ARROWS = {"KEY_UP": "↑", "KEY_DOWN": "↓", "KEY_LEFT": "←", "KEY_RIGHT": "→", "KEY_SPACE": "Space"}
 DIR_ANGLE = {"up": -90, "right": 0, "down": 90, "left": 180}
 DIR_ARROW = {"up": "↑", "left": "←", "down": "↓", "right": "→"}
 MOD_NAME_GROUP = {e.KEY[c]: g for c, g in MOD_GROUP.items()}
 MOD_LABEL = {"CTRL": "Ctrl", "ALT": "Alt", "SHIFT": "Shift", "META": "Super"}
-SIZE_RANGE = {"tap": (0.008, 0.1), "joystick": (0.03, 0.45), "look": (LOOK_MIN_R, 0.45)}
+SIZE_RANGE = {"tap": (0.008, 0.1), "joystick": (0.03, 0.45), "look": (LOOK_MIN_R, 0.45), "skill": (0.04, 0.3)}
+TYPE_TITLE = {"joystick": "摇杆", "look": "视角", "skill": "技能键"}
 MOUSE_LABELS = {"BTN_LEFT": "左键", "BTN_RIGHT": "右键", "BTN_MIDDLE": "中键",
                 "BTN_SIDE": "侧键1", "BTN_EXTRA": "侧键2"}
 # GDK button number -> evdev code, for binding mouse buttons by clicking.
@@ -155,6 +156,7 @@ class Overlay(Gtk.Window):
         self.mods_held = []
         self.mod_solo = False
         self.drag_orig = None
+        self.placing_cancel = None  # skill index whose cancel position the next click sets
         self.pointer = (0, 0)
         self.popovers_open = 0
         self.backup = copy.deepcopy(self.app.profile)
@@ -318,7 +320,7 @@ class Overlay(Gtk.Window):
         # Keep the panel on the side away from the point.
         self.panel.set_halign(Gtk.Align.START if p["x"] > 0.55 else Gtk.Align.END)
 
-        title = Gtk.Label(label={"joystick": "摇杆", "look": "视角"}.get(p["type"], "按键点"), xalign=0)
+        title = Gtk.Label(label=TYPE_TITLE.get(p["type"], "按键点"), xalign=0)
         title.add_css_class("title-3")
         self.panel.append(title)
         if p["type"] == "look":
@@ -328,15 +330,16 @@ class Overlay(Gtk.Window):
         kind = Gtk.Box(homogeneous=True)
         kind.add_css_class("linked")
         tb_tap = Gtk.ToggleButton(label="点击", active=p["type"] == "tap")
+        tb_skill = Gtk.ToggleButton(label="技能", active=p["type"] == "skill", group=tb_tap,
+                                    tooltip_text="按住选方向、松开释放（MOBA 的技能键）")
         tb_joy = Gtk.ToggleButton(label="摇杆", active=p["type"] == "joystick", group=tb_tap)
-        tb_tap.connect("toggled", lambda b: b.get_active() and GLib.idle_add(self.convert, "tap"))
-        tb_joy.connect("toggled", lambda b: b.get_active() and GLib.idle_add(self.convert, "joystick"))
-        kind.append(tb_tap)
-        kind.append(tb_joy)
+        for b, k in ((tb_tap, "tap"), (tb_skill, "skill"), (tb_joy, "joystick")):
+            b.connect("toggled", lambda b, k=k: b.get_active() and GLib.idle_add(self.convert, k))
+            kind.append(b)
         self.panel.append(kind)
 
         self.panel.append(self._caption("绑定"))
-        if p["type"] == "tap":
+        if p["type"] in KEYED:
             binding = self.binding is not None and self.binding[0] == self.sel
             lbl = "按下按键…" if binding else (combo_label(p.get("key"), p.get("mods")) if p.get("key") else "未绑定")
             b = Gtk.Button(label=lbl)
@@ -361,7 +364,57 @@ class Overlay(Gtk.Window):
             seq.connect("clicked", lambda *_: self.start_binding(self.sel, JOY_DIRS[0], seq=True))
             self.panel.append(seq)
 
+        if p["type"] == "skill":
+            self._skill_panel(p)
+            return
         self._size_and_footer(p)
+
+    def _skill_panel(self, p):
+        self.panel.append(self._caption("按住按键时移动鼠标选择方向，松开释放；\n不动鼠标直接按就是快速施法"))
+        self.panel.append(self._caption("灵敏度"))
+        sens = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0.2, 5.0, 0.05)
+        sens.set_value(p.get("sens", 1.0))
+        sens.add_mark(1.0, Gtk.PositionType.BOTTOM, None)
+        sens.set_draw_value(True)
+        sens.set_digits(2)
+        sens.connect("value-changed", lambda sc: p.__setitem__("sens", round(sc.get_value(), 2)))
+        self.panel.append(sens)
+        self.panel.append(self._caption("取消施法：按住时点鼠标右键（所有技能共用）"))
+        placing = self.placing_cancel == self.sel
+        c = p.get("cancel")
+        row = Gtk.Box(spacing=6)
+        b = Gtk.Button(label="点击画面上的取消位置…" if placing else
+                       (f"取消位置 {c[0] * 100:.0f}% , {c[1] * 100:.0f}%" if c else "设置取消位置"), hexpand=True)
+        if placing:
+            b.add_css_class("suggested-action")
+        b.connect("clicked", lambda *_: self.start_cancel_pick(self.sel))
+        row.append(b)
+        if c and not placing:
+            clear = Gtk.Button(icon_name="edit-clear-symbolic", tooltip_text="不使用取消")
+            clear.connect("clicked", lambda *_: (self._set_all_cancels(None), self.refresh_panel(), self.area.queue_draw()))
+            row.append(clear)
+        self.panel.append(row)
+        self._size_and_footer(p, "拖动范围（也可在画面上滚动滚轮）")
+
+    def _set_all_cancels(self, c):
+        """The cancel area belongs to the game and there is one: all skills share it."""
+        for q in self.points:
+            if q["type"] == "skill":
+                q["cancel"] = c
+
+    def start_cancel_pick(self, i):
+        self.cancel_binding()
+        self.placing_cancel = i
+        self.select(i)
+
+    def _set_cancel(self, x, y):
+        i, self.placing_cancel = self.placing_cancel, None
+        if i is None or i >= len(self.points):
+            return
+        self._set_all_cancels([round(x, 4), round(y, 4)])
+        self.show_toast("已设置取消位置")
+        self.refresh_panel()
+        self.area.queue_draw()
 
     def _look_panel(self, p):
         self.panel.append(self._caption("游戏里移动鼠标即拖动视角；松开一会儿手指会抬起"))
@@ -441,12 +494,23 @@ class Overlay(Gtk.Window):
         p = self.points[self.sel]
         if p["type"] == kind:
             return False
+        # Choosing a type keeps the point: don't drop it as an abandoned new one.
+        self.binding_new = False
         self.cancel_binding()
         x, y = p["x"], p["y"]
+        key, mods = (p.get("key"), p.get("mods") or []) if p["type"] in KEYED else (None, [])
+        cancel = next((q["cancel"] for q in self.points if q["type"] == "skill" and q.get("cancel")), None)
         p.clear()
-        if kind == "tap":
-            p.update(new_tap(x, y))
-            self.start_binding(self.sel, None)
+        if kind in KEYED:
+            # Tap <-> skill keeps the binding: same button, different behaviour.
+            p.update(new_tap(x, y) if kind == "tap" else new_skill(x, y))
+            p["key"], p["mods"] = key, list(mods)
+            if kind == "skill":
+                p["cancel"] = cancel  # the game's cancel area is shared by all skills
+            if key:
+                self.refresh_panel()
+            else:
+                self.start_binding(self.sel, None)
         else:
             p.update(new_joystick(x, y))
             if joystick_keys_free(self.points, p):
@@ -461,6 +525,7 @@ class Overlay(Gtk.Window):
         if self.sel is None:
             return
         self.cancel_binding()
+        self.placing_cancel = None
         if self.sel is not None and self.sel < len(self.points):
             del self.points[self.sel]
         self.select(None)
@@ -471,6 +536,8 @@ class Overlay(Gtk.Window):
 
     @staticmethod
     def _radius_px(p, h):
+        if p["type"] == "skill":
+            return SKILL_BTN * h  # r is the drag range; only the button itself is grabbable
         return max(p.get("r", TAP_R) * h, 10)
 
     def hit(self, x, y):
@@ -484,6 +551,10 @@ class Overlay(Gtk.Window):
 
     def _drag_begin(self, g, x, y):
         w, h = self._size()
+        if self.placing_cancel is not None:
+            self.drag_orig = None
+            self._set_cancel(x / w, y / h)
+            return
         self.cancel_binding()  # may delete an unbound new point, so hit-test after
         i = self.hit(x, y)
         if i is None:
@@ -514,7 +585,7 @@ class Overlay(Gtk.Window):
                 kind = self.points[self.sel]["type"]
                 if kind == "joystick":
                     self.start_binding(self.sel, JOY_DIRS[0], seq=True)
-                elif kind == "tap":
+                elif kind in KEYED:
                     self.start_binding(self.sel, None)
             else:
                 self.refresh_panel()  # panel may need to change sides
@@ -522,6 +593,11 @@ class Overlay(Gtk.Window):
         self.area.queue_draw()
 
     def _right_click(self, g, n, x, y):
+        if self.placing_cancel is not None:
+            self.placing_cancel = None
+            self.refresh_panel()
+            self.area.queue_draw()
+            return
         self.cancel_binding()
         i = self.hit(x, y)
         if i is not None:
@@ -573,7 +649,7 @@ class Overlay(Gtk.Window):
         for p in self.points:
             if p is keep:
                 continue
-            if p["type"] == "tap" and p.get("key") == name and sorted(p.get("mods") or []) == mods:
+            if p["type"] in KEYED and p.get("key") == name and sorted(p.get("mods") or []) == mods:
                 p["key"] = None
             elif p["type"] == "joystick" and not mods:
                 for d, k in p["keys"].items():
@@ -614,6 +690,11 @@ class Overlay(Gtk.Window):
         if self.binding is None:
             if self.popovers_open:
                 return False  # typing in a popover entry
+            if keyval == Gdk.KEY_Escape and self.placing_cancel is not None:
+                self.placing_cancel = None
+                self.refresh_panel()
+                self.area.queue_draw()
+                return True
             if keyval == Gdk.KEY_Escape:
                 self.finish(True)
                 return True
@@ -718,11 +799,14 @@ class Overlay(Gtk.Window):
             bind = self.binding if self.binding and self.binding[0] == i else None
             if p["type"] == "look":
                 self._draw_look(cr, p, w, h, alpha, selected, bind is not None)
+            elif p["type"] == "skill":
+                self._draw_skill(cr, p, w, h, alpha, selected, bind is not None, i in self.pressed_idx)
             elif p["type"] == "joystick":
                 self._draw_joy(cr, p, w, h, alpha, selected, bind[1] if bind else None)
             else:
                 self._draw_tap(cr, p, w, h, alpha, selected, bind is not None, i in self.pressed_idx)
         if self.edit:
+            self._draw_cancels(cr, w, h)
             self._draw_help(cr, w, h)
 
     def _label(self, cr, x, y, text, size, rgba=(1, 1, 1, 1)):
@@ -824,6 +908,56 @@ class Overlay(Gtk.Window):
         verb = "按住" if p.get("cursor_mode") == "hold" else "单击"
         hint = "按下按键…" if binding else f"{verb} {key_label(p.get('cursor_key'))} 显示鼠标"
         self._label(cr, x, y + 62, hint, 12, (1, 0.82, 0.35, 1) if binding else (1, 1, 1, max(a * 0.8, 0.3)))
+
+    def _draw_skill(self, cr, p, w, h, a, selected, binding, down):
+        x, y = p["x"] * w, p["y"] * h
+        if selected:
+            # Drag range: how far the finger can travel while aiming. Only for
+            # the selected skill; skills sit close together and rings would pile up.
+            cr.new_path()
+            cr.set_dash([6, 6])
+            cr.arc(x, y, p.get("r", SKILL_R) * h, 0, 2 * math.pi)
+            cr.set_line_width(2)
+            cr.set_source_rgba(0.35, 0.7, 1, 0.9)
+            cr.stroke()
+            cr.set_dash([])
+        # The button itself looks like a tap with a ring, so it reads as "skill".
+        self._draw_tap(cr, {**p, "r": SKILL_BTN}, w, h, a, selected, binding, down)
+        r = SKILL_BTN * h
+        cr.new_path()
+        cr.arc(x, y, r + 5, 0, 2 * math.pi)
+        cr.set_line_width(2)
+        cr.set_source_rgba(1, 0.82, 0.35, 0.8 * max(a, 0.4))
+        cr.stroke()
+
+    def _draw_cancels(self, cr, w, h):
+        seen = set()
+        sel = self.points[self.sel] if self.sel is not None and self.sel < len(self.points) else None
+        for q in self.points:
+            c = q.get("cancel") if q["type"] == "skill" else None
+            if not c or tuple(c) in seen:
+                continue
+            seen.add(tuple(c))
+            x, y, r = c[0] * w, c[1] * h, 0.03 * h
+            hot = sel is q
+            cr.new_path()
+            cr.arc(x, y, r, 0, 2 * math.pi)
+            cr.set_source_rgba(0.75, 0.15, 0.2, 0.75 if hot else 0.45)
+            cr.fill_preserve()
+            cr.set_line_width(2)
+            cr.set_source_rgba(1, 1, 1, 0.9 if hot else 0.5)
+            cr.stroke()
+            d = r * 0.4  # drawn, not a glyph: the cairo toy font has no ✕
+            cr.set_line_width(3)
+            cr.set_source_rgba(1, 1, 1, 1)
+            cr.move_to(x - d, y - d)
+            cr.line_to(x + d, y + d)
+            cr.move_to(x + d, y - d)
+            cr.line_to(x - d, y + d)
+            cr.stroke()
+            self._label(cr, x, y + r + 14, "取消施法", 12, (1, 1, 1, 0.9 if hot else 0.6))
+        if self.placing_cancel is not None:
+            self._hint(cr, w / 2, 110, "点击游戏里「取消施法」的位置（右键或 Esc 放弃）")
 
     def _draw_help(self, cr, w, h):
         text = ("左键空白处 添加按键  ·  点击按键 重新绑定  ·  拖动 移动  ·  滚轮 调整大小  ·  "

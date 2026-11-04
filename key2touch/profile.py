@@ -41,6 +41,24 @@ def new_tap(x, y, key=None, r=TAP_R):
     return {"type": "tap", "x": x, "y": y, "r": r, "key": key, "mods": []}
 
 
+# Skill key (MOBA "drag to aim"): button radius used for drawing and hit tests;
+# its r is how far the finger may be dragged from the button.
+SKILL_BTN = 0.035
+SKILL_R = 0.1
+
+# Point types driven by one key (or combo): binding rules treat them alike.
+KEYED = ("tap", "skill")
+
+
+def new_skill(x, y, key=None, r=SKILL_R):
+    """Hold the key: a finger presses (x, y) and follows the mouse within r;
+    release: it lifts and the skill fires in that direction. A tap without
+    moving the mouse is the game's quick cast. While held, the right mouse
+    button moves the finger to cancel (x, y) first, so the skill is called
+    off instead (cancel None: right button does nothing)."""
+    return {"type": "skill", "x": x, "y": y, "r": r, "sens": 1.0, "key": key, "mods": [], "cancel": None}
+
+
 def new_joystick(x, y, r=0.12):
     return {
         "type": "joystick", "x": x, "y": y, "r": r,

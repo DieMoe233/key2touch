@@ -3,7 +3,7 @@
 import math
 from evdev import ecodes as e
 
-from .profile import JOY_DIRS, LOOK_MIN_R
+from .profile import JOY_DIRS, LOOK_MIN_R, SKILL_R
 
 # Modifier keys, grouped so either side matches ("CTRL" = left or right Ctrl).
 MOD_GROUP = {
@@ -185,6 +185,56 @@ class Look:
         self.px = self.py = 0.0
 
 
+class Skill:
+    """Drag-to-aim skill button (MOBA games).
+
+    Key down presses the button; while it is held, mouse motion moves the
+    finger around it, never further than r (past the edge the offset is
+    projected back onto the circle, so reversing the mouse reacts at once).
+    Key up lifts the finger and the game casts in that direction."""
+
+    def __init__(self, touch, pt, aspect):
+        self.touch, self.x, self.y = touch, pt["x"], pt["y"]
+        self.r = pt.get("r", SKILL_R)
+        self.k = pt.get("sens", 1.0) * LOOK_SCALE
+        self.aspect = aspect
+        c = pt.get("cancel")
+        self.cancel_at = tuple(c) if c else None
+        self.slot = None
+        self.ox = self.oy = 0.0  # finger offset from the button, in height units
+        self.cancelled = False
+
+    def key(self, code, down):
+        if down and self.slot is None:
+            self.ox = self.oy = 0.0
+            self.cancelled = False
+            self.slot = self.touch.down(self.x, self.y)
+        elif not down:
+            self.release()
+
+    def motion(self, dx, dy):
+        if self.slot is None or self.cancelled or not (dx or dy):
+            return
+        ox, oy = self.ox + dx * self.k, self.oy + dy * self.k
+        n = math.hypot(ox, oy)
+        if n > self.r:
+            ox, oy = ox / n * self.r, oy / n * self.r
+        self.ox, self.oy = ox, oy
+        self.touch.move(self.slot, self.x + ox / self.aspect, self.y + oy)
+
+    def cancel(self):
+        """Drag onto the game's cancel area; the release then calls the skill off."""
+        if self.slot is None or self.cancelled or self.cancel_at is None:
+            return
+        self.cancelled = True
+        self.touch.move(self.slot, *self.cancel_at)
+
+    def release(self):
+        if self.slot is not None:
+            self.touch.up(self.slot)
+            self.slot = None
+
+
 class Mapper:
     def __init__(self, touch, profile, aspect=16 / 9):
         self.controls = []
@@ -204,7 +254,7 @@ class Mapper:
                 c = Joystick(touch, pt, aspect)
                 binds = [(code, frozenset()) for code in c.dirs]
             else:
-                c = Tap(touch, pt)
+                c = Skill(touch, pt, aspect) if pt.get("type") == "skill" else Tap(touch, pt)
                 code = keycode(pt.get("key"))
                 binds = [] if code is None else [(code, frozenset(pt.get("mods") or ()))]
             self.controls.append(c)
@@ -212,6 +262,9 @@ class Mapper:
                 self.bindings.setdefault(code, []).append((mods, i))
         # Mouse buttons bound to taps: the mouse must then be captured while active.
         self.mouse_binds = any(e.BTN_MISC <= c < e.KEY_OK for c in self.bindings)
+        # Skill keys aim with the mouse, so they need it captured as well.
+        self.skills = any(isinstance(c, Skill) for c in self.controls)
+        self.aiming = []  # indexes of held skill keys; the latest one gets the mouse
         self.mods_down = set()  # held modifier keycodes (all keyboards)
         self.fired = {}  # keycode -> control index it triggered on press
 
@@ -238,6 +291,8 @@ class Mapper:
             i = self.fired.pop(code, None)
             if i is not None:
                 self.controls[i].key(code, False)
+                if i in self.aiming:
+                    self.aiming.remove(i)
             return i
         cands = self.bindings.get(code)
         if not cands:
@@ -250,9 +305,23 @@ class Mapper:
         i = best[1]
         self.fired[code] = i
         self.controls[i].key(code, True)
+        if isinstance(self.controls[i], Skill) and i not in self.aiming:
+            self.aiming.append(i)
         return i
+
+    def aim(self, dx, dy):
+        """Mouse motion while a skill key is held. Returns False when none is."""
+        if not self.aiming:
+            return False
+        self.controls[self.aiming[-1]].motion(dx, dy)
+        return True
+
+    def cancel_aim(self):
+        if self.aiming:
+            self.controls[self.aiming[-1]].cancel()
 
     def release_all(self):
         self.fired.clear()
+        self.aiming.clear()
         for c in self.controls:
             c.reset() if isinstance(c, Look) else c.release()

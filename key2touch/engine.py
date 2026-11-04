@@ -177,6 +177,7 @@ class Engine:
         self.want_mouse_grab = False
         self.mouse_mode_now = None
         self.passmouse_down = set()
+        self.aim_buttons = set()  # mouse buttons pressed while aiming: swallowed until released
         self.cursor_free = False  # mouse cursor shown instead of camera mode
         self.cursor_tap = False  # cursor key is down and nothing else was pressed since
         self.paths = set()
@@ -340,22 +341,25 @@ class Engine:
     def mouse_mode(self):
         """How the mouse is used while mapping is active:
         "look"    camera area active: motion turns the camera, buttons can be bound
-        "buttons" profile binds mouse buttons but has no camera area: bound
-                  buttons become touches, motion and the rest go back out
-                  through a virtual mouse so the cursor keeps working
+        "buttons" profile binds mouse buttons or has skill keys, but no camera
+                  area: bound buttons become touches, motion and the rest go
+                  back out through a virtual mouse so the cursor keeps
+                  working — except while a skill key is held, when motion
+                  aims the skill instead
         None      mouse left alone (inactive, cursor shown with the cursor key,
                   or nothing in the profile uses the mouse)"""
         if not self.active:
             return None
         if self.mapper.look:
             return None if self.cursor_free else "look"
-        return "buttons" if self.mapper.mouse_binds else None
+        return "buttons" if self.mapper.mouse_binds or self.mapper.skills else None
 
     def update_look(self):
         mode = self.mouse_mode()
         if mode == self.mouse_mode_now:
             return
         self.mouse_mode_now = mode
+        self.aim_buttons.clear()  # grab state changes: releases go wherever the presses went
         if mode != "look" and self.mapper.look:
             self.mapper.look.reset()
         self.want_mouse_grab = mode is not None
@@ -400,10 +404,17 @@ class Engine:
             return
         look = self.mouse_mode_now == "look"
         dx = dy = 0
+        ax = ay = 0  # motion while a skill key is held: aims it
         out = False  # anything written to the virtual mouse
         for ev in events:
+            aiming = bool(self.mapper.aiming)
             if ev.type == e.EV_REL:
-                if look:
+                if aiming and ev.code in (e.REL_X, e.REL_Y):
+                    if ev.code == e.REL_X:
+                        ax += ev.value
+                    else:
+                        ay += ev.value
+                elif look:
                     if ev.code == e.REL_X:
                         dx += ev.value
                     elif ev.code == e.REL_Y:
@@ -417,10 +428,23 @@ class Engine:
                     self.dev_down.setdefault(dev.fd, set()).add(ev.code)
                 else:
                     self.dev_down.get(dev.fd, set()).discard(ev.code)
+                if ev.code == e.BTN_RIGHT and (aiming if ev.value else ev.code in self.aim_buttons):
+                    # Right button while aiming cancels the skill; its release
+                    # is swallowed too, even if the skill key is up by then.
+                    if ev.value:
+                        self.aim_buttons.add(ev.code)
+                        self.mapper.cancel_aim()
+                    else:
+                        self.aim_buttons.discard(ev.code)
+                    continue
                 idx = self.mapper.key(ev.code, ev.value)
                 if idx is not None:
                     self.mirror.key(ev.code, ev.value)  # grabbed: key displays still see it
                     self.emit(ev="key", code=ev.code, idx=idx, down=ev.value == 1)
+                elif (aiming and ev.value) or (not ev.value and ev.code in self.aim_buttons):
+                    # A real click while a finger aims would make Android drop
+                    # the touch, so unbound buttons are swallowed until released.
+                    (self.aim_buttons.add if ev.value else self.aim_buttons.discard)(ev.code)
                 elif not look:
                     # Unbound button in "buttons" mode: a normal click.
                     self.passmouse.write(e.EV_KEY, ev.code, ev.value)
@@ -432,6 +456,8 @@ class Engine:
             self.passmouse.syn()
         self.mirror.syn()
         # One touch move per read batch, however fast the mouse polls.
+        if ax or ay:
+            self.mapper.aim(ax, ay)
         if look:
             self.mapper.look.motion(dx, dy, time.monotonic())
 

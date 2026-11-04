@@ -2,8 +2,8 @@ import unittest
 
 from evdev import ecodes as e
 
-from key2touch.mapper import Mapper
-from key2touch.profile import new_joystick, new_tap
+from key2touch.mapper import LOOK_SCALE, Mapper
+from key2touch.profile import new_joystick, new_skill, new_tap
 
 
 class FakeTouch:
@@ -155,6 +155,85 @@ class WindowRuleTests(unittest.TestCase):
         self.assertTrue(window_matches("waydroid.com.miHoYo.GenshinImpact", rules))
         self.assertFalse(window_matches("firefox", rules))
         self.assertFalse(window_matches(None, rules))
+
+class SkillTests(unittest.TestCase):
+    """Drag-to-aim skill keys. aspect 1 keeps the arithmetic readable."""
+
+    def mapper(self, **kw):
+        pt = new_skill(0.8, 0.8, "KEY_Q", r=0.1)
+        pt.update(kw)
+        self.t = FakeTouch()
+        return Mapper(self.t, prof(pt, new_tap(0.5, 0.5, "KEY_J")), aspect=1.0)
+
+    def test_quick_cast_is_a_tap(self):
+        m = self.mapper()
+        m.key(e.KEY_Q, 1)
+        m.key(e.KEY_Q, 0)
+        self.assertEqual(self.t.log, [("down", 0, 0.8, 0.8), ("up", 0)])
+
+    def test_mouse_drags_finger_while_held(self):
+        m = self.mapper()
+        self.assertFalse(m.aim(10, 0))  # not held: the mouse is the cursor's
+        m.key(e.KEY_Q, 1)
+        self.assertTrue(m.aim(100, 0))
+        m.key(e.KEY_Q, 0)
+        self.assertEqual(self.t.log, [("down", 0, 0.8, 0.8), ("move", 0, round(0.8 + 100 * LOOK_SCALE, 4), 0.8), ("up", 0)])
+        self.assertFalse(m.aim(10, 0))
+
+    def test_finger_stays_within_range_and_reverses_at_once(self):
+        m = self.mapper()
+        m.key(e.KEY_Q, 1)
+        m.aim(10000, 0)  # far past the edge: clamped to r
+        self.assertEqual(self.t.log[-1], ("move", 0, 0.9, 0.8))
+        m.aim(-100, 0)  # coming back reacts immediately, no dead zone
+        self.assertEqual(self.t.log[-1], ("move", 0, round(0.9 - 100 * LOOK_SCALE, 4), 0.8))
+
+    def test_cancel_moves_to_cancel_area_and_ignores_motion(self):
+        m = self.mapper(cancel=[0.7, 0.2])
+        m.key(e.KEY_Q, 1)
+        m.aim(50, 50)
+        m.cancel_aim()
+        m.aim(50, 50)
+        m.key(e.KEY_Q, 0)
+        self.assertEqual(self.t.log[-2:], [("move", 0, 0.7, 0.2), ("up", 0)])
+        self.assertEqual(sum(1 for x in self.t.log if x[0] == "move"), 2)
+
+    def test_cancel_without_area_does_nothing(self):
+        m = self.mapper()
+        m.key(e.KEY_Q, 1)
+        m.cancel_aim()
+        m.key(e.KEY_Q, 0)
+        self.assertEqual(self.t.log, [("down", 0, 0.8, 0.8), ("up", 0)])
+
+    def test_next_cast_starts_fresh(self):
+        m = self.mapper(cancel=[0.7, 0.2])
+        m.key(e.KEY_Q, 1)
+        m.aim(100, 0)
+        m.cancel_aim()
+        m.key(e.KEY_Q, 0)
+        m.key(e.KEY_Q, 1)
+        m.aim(0, 100)  # aims again, from the button centre
+        self.assertEqual(self.t.log[-1], ("move", 1, 0.8, round(0.8 + 100 * LOOK_SCALE, 4)))
+
+    def test_latest_held_skill_gets_the_mouse(self):
+        t = FakeTouch()
+        m = Mapper(t, prof(new_skill(0.6, 0.8, "KEY_Q"), new_skill(0.8, 0.8, "KEY_E")), aspect=1.0)
+        m.key(e.KEY_Q, 1)
+        m.key(e.KEY_E, 1)
+        m.aim(100, 0)
+        self.assertEqual(t.log[-1][:2], ("move", 1))
+        m.key(e.KEY_E, 0)
+        m.aim(100, 0)
+        self.assertEqual(t.log[-1][:2], ("move", 0))
+
+    def test_needs_the_mouse_and_release_all(self):
+        m = self.mapper()
+        self.assertTrue(m.skills)
+        m.key(e.KEY_Q, 1)
+        m.release_all()
+        self.assertEqual(self.t.live, set())
+        self.assertFalse(m.aim(10, 0))
+        self.assertFalse(Mapper(FakeTouch(), prof(new_tap(0.5, 0.5, "KEY_J"))).skills)
 
 
 if __name__ == "__main__":

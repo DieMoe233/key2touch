@@ -15,7 +15,7 @@ from evdev import ecodes as e
 
 from . import profile as prof
 from .mapper import MOD_ORDER
-from .profile import JOY_DIRS
+from .profile import JOY_DIRS, KEYED
 
 APP_ID = "io.github.shorin_kiwata.key2touch"
 OBJ_PATH = "/" + APP_ID.replace(".", "/")
@@ -42,7 +42,8 @@ AGENT_HELP = """\
 
 key2touch turns keyboard keys into touchscreen touches (for Android games in
 Waydroid). A profile is a list of points on one display; each point is a tap
-(one key) or a joystick (4 direction keys). Use `--json` on any command.
+(one key), a skill key (one key, aimed with the mouse), a joystick (4
+direction keys) or a camera area. Use `--json` on any command.
 
 ## First: find the game's display
 Points are positioned relative to ONE display (the profile's `output`).
@@ -58,7 +59,8 @@ x = pixel_x / image_width, y = pixel_y / image_height. This works at any
 scale factor. If the game is not fullscreen, its buttons move whenever the
 window moves, so prefer fullscreen (Waydroid: F11).
 `size` is a radius as a fraction of the display height (tap default 0.025,
-joystick default 0.12, look default 0.22 and minimum 0.15).
+joystick default 0.12, look default 0.22 and minimum 0.15, skill default
+0.1 — for a skill it is how far the finger may be dragged).
 
 ## Verify
 `key2touch check -p NAME --json` reports errors (exit 1) and warnings:
@@ -69,8 +71,9 @@ missing permissions, compositor setup. Run it after every change.
 ## Keys
 Case-insensitive names: `j`, `space`, `enter`, `esc`, `f1`, `up`, `lshift`,
 `kp1` ... Combos join modifiers with `+`: `ctrl+q`, `alt+shift+1`.
-Mouse buttons: `lmb`, `rmb`, `mmb`, `mouse4`, `mouse5` (they only act while
-the camera area is in use, i.e. when the profile has a `look` point).
+Mouse buttons: `lmb`, `rmb`, `mmb`, `mouse4`, `mouse5`. While mapping is
+active the mouse is captured; motion and unbound buttons still reach the
+desktop through a virtual mouse, so the cursor keeps working.
 
 ## Camera (games like Genshin)
 `point add look X Y` adds a camera area: while mapping is active the mouse
@@ -80,6 +83,16 @@ it is re-centred. Tapping the cursor key on its own (default `lctrl`)
 toggles between camera and a free mouse cursor (`--cursor-mode hold` makes
 it hold-to-show instead); ctrl+<key> combos still work.
 Put it on an empty part of the screen, away from buttons.
+
+## Skill keys (MOBA games like Honor of Kings)
+`point add skill KEY X Y` puts a drag-to-aim skill on the skill button at
+(X, Y). Holding the key presses the button; moving the mouse drags the
+finger around it (at most `--size` away, `--sens` scales it); releasing
+the key casts in that direction. Tapping it without moving is quick cast.
+`--cancel X,Y` is the game's "cancel" area: right-clicking while the key is
+held moves the finger there, so releasing calls the skill off. Use the same
+cancel position for every skill. Measure X, Y at the centre of each skill
+button; the basic attack is a plain tap.
 
 ## Typical session
     key2touch windows --json                 # which display is the game on?
@@ -225,6 +238,16 @@ def parse_coord(text):
     return v
 
 
+def parse_xy(text):
+    """"X,Y" (fractions or percentages) -> [x, y]; "none" or None -> None."""
+    if text is None or text.strip().lower() in ("none", "off", ""):
+        return None
+    parts = [t.strip() for t in text.split(",")]
+    if len(parts) != 2:
+        raise CliError(f"需要 X,Y 两个坐标：{text!r}", EXIT_USAGE)
+    return [parse_coord(parts[0]), parse_coord(parts[1])]
+
+
 def parse_bool(text):
     t = text.lower()
     if t in ("1", "true", "yes", "on"):
@@ -257,6 +280,12 @@ def describe_point(i, p):
                 "size": round(p.get("r", 0.22), 4), "sens": p.get("sens", 1.0),
                 "cursor_key": fmt_key(p["cursor_key"]) if p.get("cursor_key") else None,
                 "cursor_mode": p.get("cursor_mode", "toggle")}
+    if p["type"] == "skill":
+        c = p.get("cancel")
+        return {"index": i, "type": "skill", "x": round(p["x"], 4), "y": round(p["y"], 4),
+                "size": round(p.get("r", prof.SKILL_R), 4), "sens": p.get("sens", 1.0),
+                "key": fmt_key(p["key"], p.get("mods")) if p.get("key") else None,
+                "cancel": [round(c[0], 4), round(c[1], 4)] if c else None}
     if p["type"] == "joystick":
         keys = {d: (fmt_key(p["keys"][d]) if p["keys"].get(d) else None) for d in JOY_DIRS}
         return {"index": i, "type": "joystick", "x": round(p["x"], 4), "y": round(p["y"], 4),
@@ -382,7 +411,7 @@ def cmd_profile(args, out):
         except (ValueError, TypeError) as ex:
             raise CliError(f"不是有效的配置 JSON：{ex}")
         for i, p in enumerate(data["points"]):
-            if p.get("type") not in ("tap", "joystick") or not (0 <= p.get("x", -1) <= 1 and 0 <= p.get("y", -1) <= 1):
+            if p.get("type") not in ("tap", "skill", "joystick", "look") or not (0 <= p.get("x", -1) <= 1 and 0 <= p.get("y", -1) <= 1):
                 raise CliError(f"第 {i} 个按键点无效：{p}")
         prof.save(args.name, data)
         notify_reload(args.name)
@@ -401,6 +430,11 @@ def _point_line(d):
     if d["type"] == "look":
         return (f"  [{d['index']}] 视角  ({d['x']:.3f}, {d['y']:.3f})  size {d['size']}  "
                 f"sens {d['sens']}  {'按住' if d['cursor_mode'] == 'hold' else '单击'} {d['cursor_key']} 显示鼠标")
+    if d["type"] == "skill":
+        c = d["cancel"]
+        cancel = f"取消 ({c[0]:.3f}, {c[1]:.3f})" if c else "无取消位置"
+        return (f"  [{d['index']}] 技能 {d['key'] or '未绑定'}  ({d['x']:.3f}, {d['y']:.3f})  "
+                f"size {d['size']}  sens {d['sens']}  {cancel}")
     if d["type"] == "joystick":
         keys = "/".join(d["keys"][k] or "?" for k in JOY_DIRS)
         return f"  [{d['index']}] 摇杆 {keys}  ({d['x']:.3f}, {d['y']:.3f})  size {d['size']}"
@@ -431,21 +465,21 @@ def _edit(args, fn):
 def _bind(points, key, mods, keep, replace):
     """A key combo may drive one point only. Without --replace a clash is an
     error (explicit is better for scripts); with it the key moves here and a
-    tap left without a key is removed."""
+    tap or skill left without a key is removed."""
     clash = [i for i, q in enumerate(points) if q is not keep and (
-        (q["type"] == "tap" and q.get("key") == key and sorted(q.get("mods") or []) == sorted(mods))
+        (q["type"] in KEYED and q.get("key") == key and sorted(q.get("mods") or []) == sorted(mods))
         or (q["type"] == "joystick" and not mods and key in q["keys"].values()))]
     if clash and not replace:
         raise CliError(f"{fmt_key(key, mods)} 已绑定在第 {clash[0]} 个按键点（加 --replace 改绑到这里）")
     _steal(points, key, mods, keep)
-    points[:] = [q for q in points if q is keep or q["type"] != "tap" or q.get("key")]
+    points[:] = [q for q in points if q is keep or q["type"] not in KEYED or q.get("key")]
 
 
 def _steal(points, key, mods, keep):
     for q in points:
         if q is keep:
             continue
-        if q["type"] == "tap" and q.get("key") == key and sorted(q.get("mods") or []) == sorted(mods):
+        if q["type"] in KEYED and q.get("key") == key and sorted(q.get("mods") or []) == sorted(mods):
             q["key"] = None
         elif q["type"] == "joystick" and not mods:
             for d, k in q["keys"].items():
@@ -466,6 +500,13 @@ def cmd_point(args, out):
             key, mods = parse_key(args.key)
             pt = prof.new_tap(x, y, key, r=args.size or prof.TAP_R)
             pt["mods"] = mods
+        elif args.kind == "skill":
+            key, mods = parse_key(args.key)
+            pt = prof.new_skill(x, y, key, r=args.size or prof.SKILL_R)
+            pt["mods"] = mods
+            if args.sens is not None:
+                pt["sens"] = args.sens
+            pt["cancel"] = parse_xy(args.cancel)
         elif args.kind == "look":
             _check_look_size(args.size)
             pt = prof.new_look(x, y, r=args.size or 0.22)
@@ -488,7 +529,7 @@ def cmd_point(args, out):
             p["points"].append(pt)
             if pt["type"] == "look":
                 return len(p["points"]) - 1
-            if pt["type"] == "tap":
+            if pt["type"] in KEYED:
                 _bind(p["points"], pt["key"], pt["mods"], pt, args.replace)
             else:
                 for k in pt["keys"].values():
@@ -513,9 +554,13 @@ def cmd_point(args, out):
                     _check_look_size(args.size)
                 q["r"] = args.size
             if args.sens is not None:
-                if q["type"] != "look":
-                    raise CliError("--sens 只适用于视角区域", EXIT_USAGE)
+                if q["type"] not in ("look", "skill"):
+                    raise CliError("--sens 只适用于视角区域和技能键", EXIT_USAGE)
                 q["sens"] = args.sens
+            if args.cancel is not None:
+                if q["type"] != "skill":
+                    raise CliError("--cancel 只适用于技能键", EXIT_USAGE)
+                q["cancel"] = parse_xy(args.cancel)
             if args.cursor_key is not None:
                 if q["type"] != "look":
                     raise CliError("--cursor-key 只适用于视角区域", EXIT_USAGE)
@@ -525,13 +570,13 @@ def cmd_point(args, out):
                     raise CliError("--cursor-mode 只适用于视角区域", EXIT_USAGE)
                 q["cursor_mode"] = args.cursor_mode
             if args.key is not None:
-                if q["type"] != "tap":
+                if q["type"] not in KEYED:
                     raise CliError("摇杆请用 --keys 上,左,下,右", EXIT_USAGE)
                 q["key"], q["mods"] = parse_key(args.key)
                 _bind(p["points"], q["key"], q["mods"], q, args.replace)
             if args.keys is not None:
                 if q["type"] != "joystick":
-                    raise CliError("点击类按键点请用 --key", EXIT_USAGE)
+                    raise CliError("点击和技能键请用 --key", EXIT_USAGE)
                 keys = [k.strip() for k in args.keys.split(",")]
                 if len(keys) != 4:
                     raise CliError("--keys 需要 4 个键，顺序为 上,左,下,右", EXIT_USAGE)
@@ -690,8 +735,17 @@ def check_profile(name, p, b):
             "否则切到别的窗口鼠标仍被占用，只能按显示鼠标的键或用开关热键")
     if not pts:
         add("warning", "no_points", "没有按键点")
+    skills = [q for q in pts if q["type"] == "skill"]
+    if skills and not any(q.get("cancel") for q in skills):
+        add("warning", "skill_no_cancel", "技能键没有设置取消位置：按住时点右键不能取消施法（--cancel X,Y）")
+    def hit_r(q):
+        """Radius of what a finger actually covers: for a skill the button, not its drag range."""
+        if q["type"] == "skill":
+            return prof.SKILL_BTN
+        return q.get("r", prof.TAP_R if q["type"] == "tap" else 0.12)
+
     for i, q in enumerate(pts):
-        r = q.get("r", prof.TAP_R if q["type"] == "tap" else 0.12)
+        r = hit_r(q)
         if not (0 <= q["x"] <= 1 and 0 <= q["y"] <= 1):
             add("error", "out_of_range", f"第 {i} 个按键点坐标越界：({q['x']}, {q['y']})", point=i)
             continue
@@ -700,15 +754,17 @@ def check_profile(name, p, b):
             add("warning", "partly_offscreen", f"第 {i} 个按键点的范围超出了屏幕边缘", point=i)
         if q["type"] == "look":
             continue  # its size is clamped to LOOK_MIN_R by the engine
-        if q["type"] == "tap" and not q.get("key"):
+        if q["type"] in KEYED and not q.get("key"):
             add("warning", "unbound", f"第 {i} 个按键点没有绑定按键", point=i)
+        c = q.get("cancel") if q["type"] == "skill" else None
+        if c and not (0 <= c[0] <= 1 and 0 <= c[1] <= 1):
+            add("error", "out_of_range", f"第 {i} 个技能键的取消位置越界：({c[0]}, {c[1]})", point=i)
         if q["type"] == "joystick" and not all(q["keys"].get(d) for d in JOY_DIRS):
             add("warning", "unbound", f"第 {i} 个摇杆有方向没有绑定按键", point=i)
     for i in range(len(pts)):
         for j in range(i + 1, len(pts)):
             a, c = pts[i], pts[j]
-            ra = a.get("r", prof.TAP_R if a["type"] == "tap" else 0.12)
-            rc = c.get("r", prof.TAP_R if c["type"] == "tap" else 0.12)
+            ra, rc = hit_r(a), hit_r(c)
             dist = (((a["x"] - c["x"]) * aspect) ** 2 + (a["y"] - c["y"]) ** 2) ** 0.5
             if dist < ra + rc:
                 kind = "inside" if dist < max(ra, rc) else "overlap"
@@ -793,6 +849,14 @@ def build_parser():
     a.add_argument("y", help="纵坐标，0..1 或百分比")
     a.add_argument("--size", type=float, help="半径，占显示器高度的比例（默认 0.025）")
     a.add_argument("--replace", action="store_true", help="按键已被别的按键点使用时，改绑到这里")
+    a = add.add_parser("skill", help="技能键（按住用鼠标选方向，松开释放）：KEY X Y", parents=[common, target])
+    a.add_argument("key", help="按键，如 q、e、ctrl+q")
+    a.add_argument("x", help="技能按钮中心的横坐标，0..1 或百分比")
+    a.add_argument("y", help="技能按钮中心的纵坐标")
+    a.add_argument("--size", type=float, help="手指最多拖多远，占显示器高度的比例（默认 0.1）")
+    a.add_argument("--sens", type=float, help="灵敏度（默认 1.0）")
+    a.add_argument("--cancel", help="游戏里「取消施法」的位置 X,Y；按住时点右键取消")
+    a.add_argument("--replace", action="store_true", help="按键已被别的按键点使用时，改绑到这里")
     a = add.add_parser("look", help="视角区域（鼠标拖动视角）：X Y", parents=[common, target])
     a.add_argument("x")
     a.add_argument("y")
@@ -811,9 +875,10 @@ def build_parser():
     p.add_argument("--x")
     p.add_argument("--y")
     p.add_argument("--size", type=float)
-    p.add_argument("--key", help="点击类按键点的按键")
+    p.add_argument("--key", help="点击、技能键的按键")
     p.add_argument("--keys", help="摇杆的 上,左,下,右")
-    p.add_argument("--sens", type=float, help="视角灵敏度")
+    p.add_argument("--sens", type=float, help="视角、技能键的灵敏度")
+    p.add_argument("--cancel", help="技能键的取消位置 X,Y（none 清除）")
     p.add_argument("--cursor-key", help="视角：显示鼠标的键")
     p.add_argument("--cursor-mode", choices=["toggle", "hold"], help="视角：单击切换 / 按住显示")
     p.add_argument("--replace", action="store_true", help="按键已被别的按键点使用时，改绑到这里")
