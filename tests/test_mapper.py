@@ -300,3 +300,113 @@ class LookTests(unittest.TestCase):
         m = Mapper(self.t, {"points": [new_tap(0.8, 0.8, "BTN_LEFT")]})
         self.assertEqual(m.key(e.BTN_LEFT, 1), 0)
         self.assertEqual(m.key(e.BTN_LEFT, 0), 0)
+
+class AnalogStickTests(unittest.TestCase):
+    """A gamepad stick on a touch joystick. aspect 2: rx is half of ry."""
+
+    def setUp(self):
+        self.t = FakeTouch()
+        js = new_joystick(0.2, 0.7, r=0.1)  # WASD as well, plus the left stick
+        js["stick"] = "left"
+        self.m = Mapper(self.t, prof(js), aspect=2.0)
+        self.ctrl = self.m.controls[0]
+
+    def test_deadzone_keeps_the_finger_up(self):
+        self.ctrl.axis(0.1, 0.05)  # default deadzone 0.15
+        self.assertEqual(self.t.log, [])
+        self.assertIsNone(self.ctrl.slot)
+
+    def test_magnitude_drives_distance(self):
+        self.ctrl.axis(0.5, 0.0)
+        # (0.5 - 0.15) / (1 - 0.15) = 0.41 of the radius, from the centre first
+        self.assertEqual(self.t.log[0], ("down", 0, 0.2, 0.7))
+        self.assertEqual(self.t.log[1], ("move", 0, 0.2206, 0.7))
+
+    def test_full_deflection_reaches_the_rim(self):
+        self.ctrl.axis(0.0, -1.0)
+        self.assertEqual(self.t.log[-1], ("move", 0, 0.2, 0.6))
+        self.ctrl.axis(1.0, 0.0)
+        self.assertEqual(self.t.log[-1], ("move", 0, 0.25, 0.7))
+
+    def test_returning_to_the_centre_lifts_the_finger(self):
+        self.ctrl.axis(0.9, 0.0)
+        self.ctrl.axis(0.0, 0.0)
+        self.assertEqual(self.t.log[-1], ("up", 0))
+        self.assertEqual(self.t.live, set())
+
+    def test_keys_and_stick_add_up_within_the_rim(self):
+        self.m.key(e.KEY_W, 1)
+        self.ctrl.axis(1.0, 0.0)
+        # (1, -1) normalised to the circle, then rx/ry applied
+        self.assertEqual(self.t.log[-1], ("move", 0, round(0.2 + 0.7071 * 0.05, 4),
+                                          round(0.7 - 0.7071 * 0.1, 4)))
+
+    def test_custom_deadzone(self):
+        js = new_joystick(0.2, 0.7, stick="left")
+        js["deadzone"] = 0.4
+        ctrl = Mapper(FakeTouch(), prof(js), aspect=1.0).controls[0]
+        ctrl.axis(0.35, 0.0)
+        self.assertIsNone(ctrl.slot)
+
+
+class StickRoutingTests(unittest.TestCase):
+    """Left stick -> touch joystick, right stick -> camera / skill aim."""
+
+    def setUp(self):
+        from key2touch.profile import new_look
+        self.t = FakeTouch()
+        js = new_joystick(0.2, 0.7, r=0.1)
+        js["stick"] = "left"
+        self.m = Mapper(self.t, prof(js, new_look(0.6, 0.4, r=0.1, stick="right")), aspect=1.0)
+        self.m.look.r = 0.1
+
+    def test_right_stick_turns_the_camera(self):
+        self.m.sticks((0.0, 0.0), (0.5, 0.0), 0.01, now=1.0)
+        # 0.5 through the drift deadzone: 0.444 of 900 counts/s * 10 ms = 4 counts
+        self.assertEqual([l[0] for l in self.t.log], ["down", "move"])
+        self.assertEqual(self.t.log[0][1], self.m.look.slot)
+        self.assertEqual(self.t.log[1][2], 0.602)
+
+    def test_stick_drift_does_not_move_the_camera(self):
+        self.m.sticks((0.0, 0.0), (0.05, 0.02), 0.01, now=1.0)
+        self.assertEqual(self.t.log, [])
+
+    def test_camera_off_while_the_mouse_is_free(self):
+        self.m.sticks((0.0, 0.0), (1.0, 0.0), 0.01, now=1.0, look=False)
+        self.assertEqual(self.t.log, [])
+
+    def test_right_stick_aims_a_held_skill(self):
+        from key2touch.profile import new_look
+        t = FakeTouch()
+        m = Mapper(t, prof(new_skill(0.8, 0.8, "KEY_Q"),
+                           new_look(0.6, 0.4, stick="right")), aspect=1.0)
+        m.key(e.KEY_Q, 1)
+        m.sticks((0.0, 0.0), (1.0, 0.0), 0.01, now=1.0)
+        self.assertEqual(m.look.slot, None)  # the camera stays where it was
+        self.assertEqual(t.log[-1], ("move", 0, round(0.8 + 9 * LOOK_SCALE, 4), 0.8))
+
+    def test_left_stick_drives_the_joystick(self):
+        self.m.sticks((0.0, -1.0), (0.0, 0.0), 0.01, now=1.0)
+        self.assertEqual(self.t.log[-1], ("move", 0, 0.2, 0.6))
+
+
+class PadFlagTests(unittest.TestCase):
+    def test_gamepad_button_binds_without_mouse_capture(self):
+        m = Mapper(FakeTouch(), prof(new_tap(0.5, 0.5, "BTN_SOUTH")))
+        self.assertTrue(m.pad)
+        self.assertFalse(m.mouse_binds)
+        self.assertEqual(m.key(e.BTN_SOUTH, 1), 0)
+
+    def test_mouse_button_still_captures_the_mouse(self):
+        m = Mapper(FakeTouch(), prof(new_tap(0.5, 0.5, "BTN_LEFT")))
+        self.assertTrue(m.mouse_binds)
+        self.assertFalse(m.pad)
+
+    def test_stick_only_joystick_counts_as_pad(self):
+        m = Mapper(FakeTouch(), prof(new_joystick(0.2, 0.7, stick="right")))
+        self.assertTrue(m.pad)
+        self.assertEqual(m.stick_names, {"right"})
+
+    def test_plain_keyboard_profile_has_no_pad(self):
+        m = Mapper(FakeTouch(), prof(new_tap(0.5, 0.5, "KEY_J")))
+        self.assertFalse(m.pad)

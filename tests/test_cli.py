@@ -21,6 +21,16 @@ class KeySpecTests(unittest.TestCase):
             with self.assertRaises(CliError):
                 parse_key(bad)
 
+    def test_gamepad(self):
+        self.assertEqual(parse_key("south"), ("BTN_SOUTH", []))
+        self.assertEqual(parse_key("ctrl+l2"), ("BTN_TL2", ["CTRL"]))
+        self.assertEqual(parse_key("BTN_DPAD_UP"), ("BTN_DPAD_UP", []))
+        self.assertEqual(fmt_key("BTN_EAST"), "east")
+        for spec in ("south", "dpad-left", "ctrl+r1", "l3", "start"):
+            self.assertEqual(fmt_key(*parse_key(spec)), spec)
+        # Any other BTN_* the kernel knows works too (paddles, extra buttons).
+        self.assertEqual(fmt_key(*parse_key("BTN_TRIGGER_HAPPY1")), "btn_trigger_happy1")
+
     def test_coords(self):
         self.assertEqual(parse_coord("0.25"), 0.25)
         self.assertEqual(parse_coord("80%"), 0.8)
@@ -58,6 +68,33 @@ class CheckTests(unittest.TestCase):
 
         p["output"] = "DP-9"
         self.assertIn(("error", "output_missing"), {(x["level"], x["code"]) for x in check_profile("t", p, Fake())})
+
+    def test_gamepad_profile_without_a_pad(self):
+        from unittest import mock
+        from key2touch.cli import check_profile
+        from key2touch.desktop import Backend
+        from key2touch.profile import new_joystick, new_tap, normalize
+
+        class Fake(Backend):
+            def outputs(self):
+                return {"DP-2": {"width": 1920, "height": 1080, "scale": 1}}
+
+            def windows(self):
+                return []
+
+        p = normalize({"output": "DP-2", "points": [new_joystick(0.15, 0.7, stick="left")]})
+        with mock.patch("key2touch.cli.glob_events", return_value=["/dev/input/event0"]), \
+                mock.patch("key2touch.cli._connected_pads", return_value=[]), \
+                mock.patch("os.access", return_value=True):
+            codes = {x["code"] for x in check_profile("t", p, Fake())}
+        self.assertIn("no_gamepad", codes)
+
+        p["points"] = [new_tap(0.5, 0.5, "KEY_J")]
+        with mock.patch("key2touch.cli.glob_events", return_value=["/dev/input/event0"]), \
+                mock.patch("key2touch.cli._connected_pads", return_value=[]), \
+                mock.patch("os.access", return_value=True):
+            codes = {x["code"] for x in check_profile("t", p, Fake())}
+        self.assertNotIn("no_gamepad", codes)
 
 
 class SkillCliTests(unittest.TestCase):
@@ -103,6 +140,25 @@ class SkillCliTests(unittest.TestCase):
         self.assertEqual(self.run_cli("point", "add", "skill", "q", "70%", "80%", "-p", "moba", "--replace")[0], 0)
         pts = self.profile.load("moba")["points"]
         self.assertEqual([q["type"] for q in pts], ["skill"])  # the keyless tap is gone
+
+    def test_gamepad_bindings_and_sticks(self):
+        self.assertEqual(self.run_cli("point", "add", "tap", "south", "80%", "80%", "-p", "moba")[0], 0)
+        self.assertEqual(self.run_cli("point", "add", "stick", "15%", "70%", "--axis", "left", "-p", "moba")[0], 0)
+        self.assertEqual(self.run_cli("point", "add", "look", "60%", "40%", "--stick", "right", "-p", "moba")[0], 0)
+        pts = self.profile.load("moba")["points"]
+        self.assertEqual(pts[0]["key"], "BTN_SOUTH")
+        self.assertEqual((pts[1]["stick"], pts[1]["deadzone"]), ("left", 0.15))
+        self.assertFalse(any(pts[1]["keys"].values()))
+        self.assertEqual(pts[2]["stick"], "right")
+        self.assertEqual(self.run_cli("point", "set", "1", "--stick", "right",
+                                      "--deadzone", "0.2", "-p", "moba")[0], 0)
+        pts = self.profile.load("moba")["points"]
+        self.assertEqual((pts[1]["stick"], pts[1]["deadzone"]), ("right", 0.2))
+        self.assertEqual(self.run_cli("point", "set", "1", "--stick", "none", "-p", "moba")[0], 0)
+        self.assertIsNone(self.profile.load("moba")["points"][1]["stick"])
+        self.assertEqual(self.run_cli("point", "set", "0", "--stick", "left", "-p", "moba")[0], 2)
+        self.assertEqual(self.run_cli("point", "add", "stick", "15%", "70%", "--axis", "sideways",
+                                      "-p", "moba")[0], 2)
 
     def test_import_accepts_every_point_type(self):
         import io

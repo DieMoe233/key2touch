@@ -16,8 +16,10 @@ gi.require_version("Gtk4LayerShell", "1.0")
 from gi.repository import Gdk, GLib, Gtk, Gtk4LayerShell as LS  # noqa: E402
 from evdev import ecodes as e  # noqa: E402
 
+from . import gamepad  # noqa: E402
 from .mapper import MOD_GROUP, MOD_ORDER  # noqa: E402
-from .profile import JOY_DIRS, KEYED, LOOK_MIN_R, SKILL_BTN, SKILL_R, TAP_R, new_joystick, new_look, new_skill, new_tap  # noqa: E402
+from .profile import (JOY_DIRS, KEYED, LOOK_MIN_R, SKILL_BTN, SKILL_R, STICK_DEADZONE, TAP_R,  # noqa: E402
+                      new_joystick, new_look, new_skill, new_tap)
 
 ARROWS = {"KEY_UP": "↑", "KEY_DOWN": "↓", "KEY_LEFT": "←", "KEY_RIGHT": "→", "KEY_SPACE": "Space"}
 DIR_ANGLE = {"up": -90, "right": 0, "down": 90, "left": 180}
@@ -40,7 +42,10 @@ def key_label(name):
         return ARROWS[name]
     if name in MOUSE_LABELS:
         return MOUSE_LABELS[name]
-    s = name.removeprefix("KEY_")
+    pad = gamepad.label(name)
+    if pad:
+        return pad
+    s = name.removeprefix("KEY_").removeprefix("BTN_")
     for a, b in (("LEFT", "L"), ("RIGHT", "R")):
         if s.startswith(a) and len(s) > len(a):
             return b + s[len(a):].capitalize()  # LShift, RAlt
@@ -53,10 +58,10 @@ def combo_label(key, mods=()):
 
 
 def key_name(evcode):
-    n = e.KEY.get(evcode)
+    n = e.KEY.get(evcode)  # ecodes.KEY only holds KEY_* names
     if isinstance(n, list):
         n = n[0]
-    return n
+    return n or gamepad.name(evcode)
 
 
 def find_monitor(connector):
@@ -364,6 +369,10 @@ class Overlay(Gtk.Window):
             seq.connect("clicked", lambda *_: self.start_binding(self.sel, JOY_DIRS[0], seq=True))
             self.panel.append(seq)
 
+        if p["type"] == "joystick":
+            self.panel.append(self._caption("手柄摇杆（可以和上面的按键同时用）"))
+            self.panel.append(self._stick_row(p))
+
         if p["type"] == "skill":
             self._skill_panel(p)
             return
@@ -440,6 +449,8 @@ class Overlay(Gtk.Window):
         mode.append(tg)
         mode.append(hd)
         self.panel.append(mode)
+        self.panel.append(self._caption("手柄摇杆（可选，鼠标仍然可用）"))
+        self.panel.append(self._stick_row(p))
         self.panel.append(self._caption("灵敏度"))
         sens = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0.2, 5.0, 0.05)
         sens.set_value(p.get("sens", 1.0))
@@ -469,6 +480,32 @@ class Overlay(Gtk.Window):
         delete.add_css_class("destructive-action")
         delete.connect("clicked", lambda *_: self.delete_selected())
         self.panel.append(delete)
+
+    def _stick_row(self, p):
+        """Pad stick a point follows: 不用 / 左摇杆 / 右摇杆."""
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        dd = Gtk.DropDown(model=Gtk.StringList.new(["不用", "左摇杆", "右摇杆"]))
+        dd.set_selected({"left": 1, "right": 2}.get(p.get("stick"), 0))
+        dd.connect("notify::selected", self._on_stick, p)
+        box.append(dd)
+        if p.get("stick") and p["type"] == "joystick":
+            dz = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0.0, 0.4, 0.01)
+            dz.set_value(p.get("deadzone", STICK_DEADZONE))
+            dz.set_draw_value(True)
+            dz.set_digits(2)
+            dz.set_tooltip_text("死区：摇杆要推过这里才会移动")
+            dz.connect("value-changed",
+                       lambda sc, p=p: p.__setitem__("deadzone", round(sc.get_value(), 2)))
+            box.append(dz)
+        return box
+
+    def _on_stick(self, dd, _, p):
+        p["stick"] = (None, "left", "right")[dd.get_selected()]
+        if p["stick"] is not None and p["type"] == "joystick":
+            p.setdefault("deadzone", STICK_DEADZONE)
+        # Rebuilding the panel from its own signal would destroy `dd` mid-call.
+        GLib.idle_add(self.refresh_panel)
+        self.area.queue_draw()
 
     @staticmethod
     def _caption(text):
@@ -727,6 +764,20 @@ class Overlay(Gtk.Window):
         return any(name == p.get(f"{k}_key") and set(mods) == set(p.get(f"{k}_mods") or ())
                    for k in ("toggle", "edit"))
 
+    def gamepad_event(self, code, down):
+        """A pad button pressed while the editor is open: bind it to the
+        selected point, exactly like a key press."""
+        if not down or self.binding is None:
+            return
+        name = gamepad.name(code)
+        if not name:
+            return
+        mods = {MOD_NAME_GROUP[m] for m in self.mods_held}
+        if self.is_hotkey(name, mods):
+            self.show_toast(f"{combo_label(name, mods)} 是热键，不能绑定")
+            return
+        self._bind(name, mods)
+
     def _key_released(self, c, keyval, keycode, state):
         name = key_name(keycode - 8)
         if name not in MOD_NAME_GROUP:
@@ -853,7 +904,7 @@ class Overlay(Gtk.Window):
         size = clamp(min(r * 0.8, 2.6 * r / max(len(text), 1)), 9, 30)
         self._label(cr, x, y, text, size, (1, 1, 1, max(a, 0.35)))
         if binding:
-            self._hint(cr, x, y - r - 24, "按下要绑定的键或鼠标按键，可配合 Ctrl/Alt/Shift（Esc 取消）")
+            self._hint(cr, x, y - r - 24, "按下要绑定的键、鼠标按键或手柄按键，可配合 Ctrl/Alt/Shift（Esc 取消）")
 
     def _draw_joy(self, cr, p, w, h, a, selected, bind_dir):
         x, y, r = p["x"] * w, p["y"] * h, p["r"] * h
@@ -871,17 +922,22 @@ class Overlay(Gtk.Window):
         cr.arc(x, y, 6, 0, 2 * math.pi)
         cr.set_source_rgba(1, 1, 1, 0.8 * a)
         cr.fill()
-        for d in JOY_DIRS:
-            ang = math.radians(DIR_ANGLE[d])
-            lx, ly = x + math.cos(ang) * r * 0.62, y + math.sin(ang) * r * 0.62
-            k = p["keys"].get(d)
-            if bind_dir == d:
-                text, col = "…", (1, 0.8, 0.3, 1)
-            elif k in self.pressed:
-                text, col = key_label(k), (0.4, 0.75, 1, 1)
-            else:
-                text, col = key_label(k), (1, 1, 1, max(a, 0.35))
-            self._label(cr, lx, ly, text, clamp(r * 0.16, 11, 22), col)
+        if p.get("stick") and not any(p["keys"].get(d) for d in JOY_DIRS) and not bind_dir:
+            # Stick-only: the four direction labels would all be "?".
+            self._label(cr, x, y, "LS" if p["stick"] == "left" else "RS",
+                        clamp(r * 0.3, 12, 26), (1, 1, 1, max(a, 0.35)))
+        else:
+            for d in JOY_DIRS:
+                ang = math.radians(DIR_ANGLE[d])
+                lx, ly = x + math.cos(ang) * r * 0.62, y + math.sin(ang) * r * 0.62
+                k = p["keys"].get(d)
+                if bind_dir == d:
+                    text, col = "…", (1, 0.8, 0.3, 1)
+                elif k in self.pressed:
+                    text, col = key_label(k), (0.4, 0.75, 1, 1)
+                else:
+                    text, col = key_label(k), (1, 1, 1, max(a, 0.35))
+                self._label(cr, lx, ly, text, clamp(r * 0.16, 11, 22), col)
         if bind_dir:
             names = {"up": "上", "left": "左", "down": "下", "right": "右"}
             self._hint(cr, x, y - r - 24, f"按下「{names[bind_dir]}」方向的键（Esc 停止）")
@@ -960,8 +1016,8 @@ class Overlay(Gtk.Window):
             self._hint(cr, w / 2, 110, "点击游戏里「取消施法」的位置（右键或 Esc 放弃）")
 
     def _draw_help(self, cr, w, h):
-        text = ("左键空白处 添加按键  ·  点击按键 重新绑定  ·  拖动 移动  ·  滚轮 调整大小  ·  "
-                "右键 / Delete 删除  ·  Esc 保存并退出")
+        text = ("左键空白处 添加按键  ·  点击按键 重新绑定（也可按手柄按键）  ·  拖动 移动  ·  "
+                "滚轮 调整大小  ·  右键 / Delete 删除  ·  Esc 保存并退出")
         self._hint(cr, w / 2, h - 36, text)
 
 

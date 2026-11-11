@@ -3,7 +3,8 @@
 import math
 from evdev import ecodes as e
 
-from .profile import JOY_DIRS, LOOK_MIN_R, SKILL_R
+from .gamepad import is_button as is_gamepad_button
+from .profile import JOY_DIRS, LOOK_MIN_R, SKILL_R, STICK_DEADZONE, STICK_NAMES
 
 # Modifier keys, grouped so either side matches ("CTRL" = left or right Ctrl).
 MOD_GROUP = {
@@ -42,6 +43,13 @@ class Tap:
 
 
 class Joystick:
+    """Touch stick driven by direction keys and/or a gamepad stick.
+
+    Keys are 8-way; an analogue stick keeps its magnitude, so walking slowly
+    is possible. Its deadzone is rescaled rather than just dropped: just
+    outside it the finger starts from the centre, and full deflection still
+    reaches the rim."""
+
     def __init__(self, touch, pt, aspect):
         self.touch, self.x, self.y = touch, pt["x"], pt["y"]
         r = pt.get("r", 0.12)
@@ -52,16 +60,37 @@ class Joystick:
             c = keycode(pt.get("keys", {}).get(d))
             if c is not None:
                 self.dirs[c] = d
+        self.deadzone = float(pt.get("deadzone", STICK_DEADZONE))
+        self.ax = self.ay = 0.0  # analogue deflection, -1..1
         self.held = set()
         self.slot = None
 
-    def target(self):
-        dx = ("right" in self.held) - ("left" in self.held)
-        dy = ("down" in self.held) - ("up" in self.held)
+    def axis(self, x, y):
+        """Analogue stick deflection (-1..1 on both axes)."""
+        mag = math.hypot(x, y)
+        if mag <= self.deadzone:
+            self.ax = self.ay = 0.0
+        else:
+            scale = min(1.0, (mag - self.deadzone) / (1.0 - self.deadzone)) / mag
+            self.ax, self.ay = x * scale, y * scale
+        self._apply()
+
+    def vector(self):
+        """Combined deflection of keys and stick; None when nothing is held."""
+        dx = ("right" in self.held) - ("left" in self.held) + self.ax
+        dy = ("down" in self.held) - ("up" in self.held) + self.ay
         n = math.hypot(dx, dy)
         if n == 0:
+            return (0.0, 0.0) if self.held else None
+        if n > 1:  # keys and a full stick push add up: stay inside the rim
+            dx, dy = dx / n, dy / n
+        return dx, dy
+
+    def target(self):
+        v = self.vector()
+        if v is None:
             return self.x, self.y
-        return self.x + dx / n * self.rx, self.y + dy / n * self.ry
+        return self.x + v[0] * self.rx, self.y + v[1] * self.ry
 
     def key(self, code, down):
         d = self.dirs[code]
@@ -69,7 +98,10 @@ class Joystick:
             self.held.add(d)
         else:
             self.held.discard(d)
-        if not self.held:
+        self._apply()
+
+    def _apply(self):
+        if not self.held and self.ax == 0 and self.ay == 0:
             self.release()
             return
         if self.slot is None:
@@ -88,6 +120,7 @@ class Joystick:
 
 LOOK_SCALE = 0.0005  # touch movement (fraction of output height) per mouse count at sens 1.0
 LOOK_IDLE = 0.3  # seconds without mouse motion before the camera finger lifts
+STICK_DEAD = 0.1  # stick drift ignored when steering the camera or aiming a skill
 
 
 class Look:
@@ -236,10 +269,14 @@ class Skill:
 
 
 class Mapper:
+    STICK_SPEED = 900.0  # virtual mouse counts/s at full stick deflection
+
     def __init__(self, touch, profile, aspect=16 / 9):
         self.controls = []
         self.bindings = {}  # keycode -> [(mods frozenset, control index)]
         self.look = None
+        self.look_stick = None  # gamepad stick that also turns the camera
+        self.stick_controls = {}  # "left"/"right" -> [joystick controls]
         self.cursor_key = None
         self.cursor_mode = "toggle"
         for i, pt in enumerate(profile.get("points", [])):
@@ -250,9 +287,14 @@ class Mapper:
                     self.look = c
                     self.cursor_key = keycode(pt.get("cursor_key"))
                     self.cursor_mode = pt.get("cursor_mode", "toggle")
+                    stick = pt.get("stick")
+                    self.look_stick = stick if stick in STICK_NAMES else None
             elif pt.get("type") == "joystick":
                 c = Joystick(touch, pt, aspect)
                 binds = [(code, frozenset()) for code in c.dirs]
+                stick = pt.get("stick")
+                if stick in STICK_NAMES:
+                    self.stick_controls.setdefault(stick, []).append(c)
             else:
                 c = Skill(touch, pt, aspect) if pt.get("type") == "skill" else Tap(touch, pt)
                 code = keycode(pt.get("key"))
@@ -260,10 +302,16 @@ class Mapper:
             self.controls.append(c)
             for code, mods in binds:
                 self.bindings.setdefault(code, []).append((mods, i))
+        # Sticks the engine must take away from the pad: joystick controls and
+        # the camera area, if any.
+        self.stick_names = set(self.stick_controls) | ({self.look_stick} if self.look_stick else set())
         # Mouse buttons bound to taps: the mouse must then be captured while active.
-        self.mouse_binds = any(e.BTN_MISC <= c < e.KEY_OK for c in self.bindings)
+        self.mouse_binds = any(e.BTN_MOUSE <= c < e.BTN_JOYSTICK for c in self.bindings)
         # Skill keys aim with the mouse, so they need it captured as well.
         self.skills = any(isinstance(c, Skill) for c in self.controls)
+        # The profile uses a gamepad (a button binding or a stick): the engine
+        # then grabs pads and mirrors everything the profile does not use.
+        self.pad = bool(self.stick_names) or any(is_gamepad_button(c) for c in self.bindings)
         self.aiming = []  # indexes of held skill keys; the latest one gets the mouse
         self.mods_down = set()  # held modifier keycodes (all keyboards)
         self.fired = {}  # keycode -> control index it triggered on press
@@ -308,6 +356,39 @@ class Mapper:
         if isinstance(self.controls[i], Skill) and i not in self.aiming:
             self.aiming.append(i)
         return i
+
+    @staticmethod
+    def _steer(x, y):
+        """Stick vector with the drift around the centre cut out.
+
+        Camera and aim speed keep their full range: just outside the centre
+        the camera starts moving slowly instead of jumping to 10 %."""
+        mag = math.hypot(x, y)
+        if mag <= STICK_DEAD:
+            return 0.0, 0.0
+        k = (mag - STICK_DEAD) / (1.0 - STICK_DEAD) / mag
+        return x * k, y * k
+
+    def sticks(self, left, right, dt, now, look=True):
+        """Feed the pads' stick vectors (-1..1) for one frame.
+
+        Sticks drive joystick controls directly. The right stick also stands
+        in for the mouse: while a skill key is held it aims that skill,
+        otherwise it turns the camera if the look area names a stick."""
+        for name, v in (("left", left), ("right", right)):
+            for c in self.stick_controls.get(name, ()):
+                c.axis(*v)
+        rx, ry = self._steer(*right)
+        if self.aiming:
+            # Like the mouse: while a skill is held the camera stays put.
+            if rx or ry:
+                self.aim(rx * self.STICK_SPEED * dt, ry * self.STICK_SPEED * dt)
+            return
+        if not look or self.look is None or not self.look_stick:
+            return
+        x, y = self._steer(*(left if self.look_stick == "left" else right))
+        if x or y:
+            self.look.motion(x * self.STICK_SPEED * dt, y * self.STICK_SPEED * dt, now)
 
     def aim(self, dx, dy):
         """Mouse motion while a skill key is held. Returns False when none is."""

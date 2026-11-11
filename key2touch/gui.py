@@ -597,6 +597,7 @@ class Key2Touch(Adw.Application):
             "editing": self.editor is not None, "profile": self.name,
             "output": self.profile["output"], "points": len(self.profile["points"]),
             "focus": st.get("focus"), "desktop": self.backend.name,
+            "pads": st.get("pads", 0),
             "hotkey": self.hotkey_label(), "edit_hotkey": self.hotkey_label("edit"),
             "priority": st.get("priority"),
         }, ensure_ascii=False)))
@@ -609,7 +610,7 @@ class Key2Touch(Adw.Application):
 
         g = Adw.PreferencesGroup(title="键盘")
         grab = Adw.SwitchRow(title="已映射的键不再传给应用",
-                             subtitle="映射生效时，这些键只会变成触摸，游戏收不到按键本身",
+                             subtitle="映射生效时，这些键和手柄按键只会变成触摸，游戏收不到输入本身",
                              active=self.profile.get("grab", True))
         grab.connect("notify::active", lambda r, _: self.set_opt("grab", r.get_active()))
         g.add(grab)
@@ -646,7 +647,7 @@ class Key2Touch(Adw.Application):
         g = Adw.PreferencesGroup(title="运行状态")
         self.diag_rows = {}
         for key, title in (("desktop", "桌面"), ("focus", "当前焦点窗口"), ("keyboards", "键盘"),
-                           ("priority", "引擎调度")):
+                           ("pads", "手柄"), ("priority", "引擎调度")):
             r = Adw.ActionRow(title=title, subtitle_selectable=True)
             r.add_css_class("property")
             self.diag_rows[key] = r
@@ -744,6 +745,7 @@ class Key2Touch(Adw.Application):
             "desktop": self.backend.label + ("" if self.backend.supports_focus else "（无焦点信息）"),
             "focus": st.get("focus") or "-",
             "keyboards": f"{st.get('keyboards', 0)} 个",
+            "pads": f"{st.get('pads', 0)} 个",
             "priority": st.get("priority", "-"),
         }
         for k, r in self.diag_rows.items():
@@ -928,6 +930,9 @@ class Key2Touch(Adw.Application):
         if ev == "key":
             if self.hud:
                 self.hud.key_event(msg["code"], msg.get("idx"), msg["down"])
+        elif ev == "pad":
+            if self.editor:
+                self.editor.gamepad_event(msg["code"], msg["down"])
         elif ev == "toggled":
             # Toggled by the hotkey, maybe by accident in-game: say so.
             n = Gio.Notification.new("key2touch：映射已" + ("开启" if msg["enabled"] else "关闭"))

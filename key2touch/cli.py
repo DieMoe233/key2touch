@@ -13,9 +13,10 @@ import sys
 
 from evdev import ecodes as e
 
+from . import gamepad
 from . import profile as prof
 from .mapper import MOD_ORDER
-from .profile import JOY_DIRS, KEYED
+from .profile import JOY_DIRS, KEYED, STICK_NAMES
 
 APP_ID = "io.github.shorin_kiwata.key2touch"
 OBJ_PATH = "/" + APP_ID.replace(".", "/")
@@ -40,10 +41,11 @@ COMMANDS = {"on", "off", "toggle", "status", "edit", "show", "quit", "reset-touc
 AGENT_HELP = """\
 # key2touch for AI agents
 
-key2touch turns keyboard keys into touchscreen touches (for Android games in
-Waydroid). A profile is a list of points on one display; each point is a tap
-(one key), a skill key (one key, aimed with the mouse), a joystick (4
-direction keys) or a camera area. Use `--json` on any command.
+key2touch turns keyboard keys and gamepad buttons/sticks into touchscreen
+touches (for Android games in Waydroid). A profile is a list of points on one
+display; each point is a tap (one key or pad button), a skill key (one key,
+aimed with the mouse or the right stick), a joystick (4 direction keys and/or
+a pad stick) or a camera area. Use `--json` on any command.
 
 ## First: find the game's display
 Points are positioned relative to ONE display (the profile's `output`).
@@ -74,6 +76,10 @@ Case-insensitive names: `j`, `space`, `enter`, `esc`, `f1`, `up`, `lshift`,
 Mouse buttons: `lmb`, `rmb`, `mmb`, `mouse4`, `mouse5`. While mapping is
 active the mouse is captured; motion and unbound buttons still reach the
 desktop through a virtual mouse, so the cursor keeps working.
+Gamepad buttons use pad names and bind exactly like keys: `south` (A/Cross),
+`east` (B/Circle), `north` (Y/Triangle), `west` (X/Square), `l1`/`r1`,
+`l2`/`r2` (triggers), `l3`/`r3` (stick clicks), `select`, `start`, `guide`,
+`dpad-up`, `dpad-down`, `dpad-left`, `dpad-right`.
 
 ## Camera (games like Genshin)
 `point add look X Y` adds a camera area: while mapping is active the mouse
@@ -82,6 +88,7 @@ scales it (default 1.0), `--size` is how far the finger may travel before
 it is re-centred. Tapping the cursor key on its own (default `lctrl`)
 toggles between camera and a free mouse cursor (`--cursor-mode hold` makes
 it hold-to-show instead); ctrl+<key> combos still work.
+`--stick right` makes a gamepad stick turn the camera too.
 Put it on an empty part of the screen, away from buttons.
 
 ## Skill keys (MOBA games like Honor of Kings)
@@ -89,10 +96,23 @@ Put it on an empty part of the screen, away from buttons.
 (X, Y). Holding the key presses the button; moving the mouse drags the
 finger around it (at most `--size` away, `--sens` scales it); releasing
 the key casts in that direction. Tapping it without moving is quick cast.
+While the key is held the right stick aims the skill as well as the
+mouse (profiles that use a pad grab it; a padless profile leaves the pad
+alone).
 `--cancel X,Y` is the game's "cancel" area: right-clicking while the key is
 held moves the finger there, so releasing calls the skill off. Use the same
 cancel position for every skill. Measure X, Y at the centre of each skill
 button; the basic attack is a plain tap.
+
+## Gamepad
+A pad is just another input device. While mapping is active key2touch grabs
+it: mapped buttons become touches, and everything unmapped is re-injected
+through a virtual pad, so menus and games that use the pad natively still
+get it. A profile with no gamepad point leaves the pad completely alone.
+`point add stick X Y --axis left` puts the left stick on a touch joystick
+(`--axis right` for the right one, `--deadzone 0.15` if a worn stick
+drifts). D-pads that only report a hat axis and analogue triggers are
+translated to `dpad-*`/`l2`/`r2` automatically, on any pad.
 
 ## Typical session
     key2touch windows --json                 # which display is the game on?
@@ -100,6 +120,7 @@ button; the basic attack is a plain tap.
     key2touch set output DP-2 -p genshin
     key2touch point add tap j 85% 78% -p genshin
     key2touch point add stick 15% 70% --keys w,a,s,d --size 0.13 -p genshin
+    key2touch point add stick 15% 70% --axis left --size 0.13 -p genshin   # 手柄左摇杆
     key2touch point add look 60% 40% --sens 1.2 -p genshin
     key2touch point add tap lmb 85% 78% -p genshin --replace
     key2touch point list -p genshin --json
@@ -204,14 +225,21 @@ def parse_key(text):
         if not g:
             raise CliError(f"未知的修饰键：{m!r}（可用 ctrl / alt / shift / super）", EXIT_USAGE)
         groups.append(g)
+    mods = [g for g in MOD_ORDER if g in groups]
     if key.upper() in MOUSE_ALIASES:
-        return MOUSE_ALIASES[key.upper()], [g for g in MOD_ORDER if g in groups]
+        return MOUSE_ALIASES[key.upper()], mods
+    # south / l1 / dpad-up ... or the raw BTN_SOUTH spelling.
+    gp = gamepad.code(key)
+    if gp is not None:
+        return gamepad.name(gp), mods
     k = key.upper().removeprefix("KEY_")
     k = KEY_ALIASES.get(k, k)
     name = f"KEY_{k}"
     if name not in e.ecodes:
+        if key.upper().startswith("BTN_") and key.upper() in e.ecodes:  # raw pad name
+            return key.upper(), mods
         raise CliError(f"未知的按键：{key!r}", EXIT_USAGE)
-    return name, [g for g in MOD_ORDER if g in groups]
+    return name, mods
 
 
 _REVERSE_ALIASES = {"LEFTSHIFT": "lshift", "RIGHTSHIFT": "rshift", "LEFTCTRL": "lctrl", "RIGHTCTRL": "rctrl",
@@ -221,11 +249,25 @@ _MOD_SPEC = {"CTRL": "ctrl", "ALT": "alt", "SHIFT": "shift", "META": "super"}
 
 def fmt_key(name, mods=()):
     """Inverse of parse_key: 'KEY_Q', ['CTRL'] -> 'ctrl+q' (round-trips)."""
+    parts = [_MOD_SPEC[m] for m in MOD_ORDER if m in (mods or ())]
     if name in _MOUSE_SPEC:
-        return "+".join([_MOD_SPEC[m] for m in MOD_ORDER if m in (mods or ())] + [_MOUSE_SPEC[name]])
+        return "+".join(parts + [_MOUSE_SPEC[name]])
+    gp = gamepad.short(name)
+    if gp:
+        return "+".join(parts + [gp])
     k = name.removeprefix("KEY_")
     k = _REVERSE_ALIASES.get(k, k.lower())
-    return "+".join([_MOD_SPEC[m] for m in MOD_ORDER if m in (mods or ())] + [k])
+    return "+".join(parts + [k])
+
+
+def parse_stick(text):
+    """'left' / 'right' / 'none' -> a stick name or None."""
+    t = (text or "").strip().lower()
+    if t in ("", "none", "off"):
+        return None
+    if t not in STICK_NAMES:
+        raise CliError(f"未知的摇杆：{text!r}（left / right / none）", EXIT_USAGE)
+    return t
 
 
 def parse_coord(text):
@@ -279,7 +321,7 @@ def describe_point(i, p):
         return {"index": i, "type": "look", "x": round(p["x"], 4), "y": round(p["y"], 4),
                 "size": round(p.get("r", 0.22), 4), "sens": p.get("sens", 1.0),
                 "cursor_key": fmt_key(p["cursor_key"]) if p.get("cursor_key") else None,
-                "cursor_mode": p.get("cursor_mode", "toggle")}
+                "cursor_mode": p.get("cursor_mode", "toggle"), "stick": p.get("stick")}
     if p["type"] == "skill":
         c = p.get("cancel")
         return {"index": i, "type": "skill", "x": round(p["x"], 4), "y": round(p["y"], 4),
@@ -289,7 +331,8 @@ def describe_point(i, p):
     if p["type"] == "joystick":
         keys = {d: (fmt_key(p["keys"][d]) if p["keys"].get(d) else None) for d in JOY_DIRS}
         return {"index": i, "type": "joystick", "x": round(p["x"], 4), "y": round(p["y"], 4),
-                "size": round(p.get("r", 0.12), 4), "keys": keys}
+                "size": round(p.get("r", 0.12), 4), "keys": keys, "stick": p.get("stick"),
+                "deadzone": round(p.get("deadzone", prof.STICK_DEADZONE), 2)}
     return {"index": i, "type": "tap", "x": round(p["x"], 4), "y": round(p["y"], 4),
             "size": round(p.get("r", prof.TAP_R), 4),
             "key": fmt_key(p["key"], p.get("mods")) if p.get("key") else None}
@@ -324,7 +367,8 @@ def cmd_control(args, out):
         state = "编辑中" if st.get("editing") else "生效中" if st.get("active") else \
             "已开启（等待目标窗口）" if st.get("enabled") else "已关闭"
         out.emit(st, f"{state} · 配置 {st.get('profile')} · {st.get('points')} 个按键点 · "
-                     f"显示器 {st.get('output')} · 焦点 {st.get('focus') or '-'} · "
+                     f"显示器 {st.get('output')} · 手柄 {st.get('pads', 0)} 个 · "
+                     f"焦点 {st.get('focus') or '-'} · "
                      f"开关热键 {st.get('hotkey') or '-'} · 编辑热键 {st.get('edit_hotkey') or '-'}")
         return 0
     from gi.repository import GLib
@@ -426,18 +470,28 @@ def _check_look_size(size):
         raise CliError(f"视角区域的 size 最小为 {prof.LOOK_MIN_R}（太小转视角会一顿一顿）", EXIT_USAGE)
 
 
+STICK_LABEL = {"left": "左摇杆", "right": "右摇杆"}
+
+
 def _point_line(d):
     if d["type"] == "look":
+        stick = f"  {STICK_LABEL[d['stick']]}也能转视角" if d.get("stick") else ""
         return (f"  [{d['index']}] 视角  ({d['x']:.3f}, {d['y']:.3f})  size {d['size']}  "
-                f"sens {d['sens']}  {'按住' if d['cursor_mode'] == 'hold' else '单击'} {d['cursor_key']} 显示鼠标")
+                f"sens {d['sens']}  {'按住' if d['cursor_mode'] == 'hold' else '单击'} {d['cursor_key']} 显示鼠标"
+                f"{stick}")
     if d["type"] == "skill":
         c = d["cancel"]
         cancel = f"取消 ({c[0]:.3f}, {c[1]:.3f})" if c else "无取消位置"
         return (f"  [{d['index']}] 技能 {d['key'] or '未绑定'}  ({d['x']:.3f}, {d['y']:.3f})  "
                 f"size {d['size']}  sens {d['sens']}  {cancel}")
     if d["type"] == "joystick":
-        keys = "/".join(d["keys"][k] or "?" for k in JOY_DIRS)
-        return f"  [{d['index']}] 摇杆 {keys}  ({d['x']:.3f}, {d['y']:.3f})  size {d['size']}"
+        keys = "/".join(d["keys"][k] for k in JOY_DIRS if d["keys"].get(k))
+        if d.get("stick"):
+            src = STICK_LABEL[d["stick"]] + (f" + {keys}" if keys else "")
+            src += f"  死区 {d['deadzone']}"
+        else:
+            src = keys or "未绑定"
+        return f"  [{d['index']}] 摇杆 {src}  ({d['x']:.3f}, {d['y']:.3f})  size {d['size']}"
     return f"  [{d['index']}] {d['key'] or '未绑定'}  ({d['x']:.3f}, {d['y']:.3f})  size {d['size']}"
 
 
@@ -509,7 +563,7 @@ def cmd_point(args, out):
             pt["cancel"] = parse_xy(args.cancel)
         elif args.kind == "look":
             _check_look_size(args.size)
-            pt = prof.new_look(x, y, r=args.size or 0.22)
+            pt = prof.new_look(x, y, r=args.size or 0.22, stick=parse_stick(args.stick))
             if args.sens is not None:
                 pt["sens"] = args.sens
             if args.cursor_key:
@@ -517,11 +571,16 @@ def cmd_point(args, out):
             if args.cursor_mode:
                 pt["cursor_mode"] = args.cursor_mode
         else:
-            keys = [k.strip() for k in (args.keys or "w,a,s,d").split(",")]
-            if len(keys) != 4:
-                raise CliError("--keys 需要 4 个键，顺序为 上,左,下,右", EXIT_USAGE)
-            pt = prof.new_joystick(x, y, r=args.size or 0.12)
-            pt["keys"] = {d: parse_key(k)[0] for d, k in zip(JOY_DIRS, keys)}
+            stick = parse_stick(args.stick)
+            keys = None
+            if args.keys:
+                keys = [k.strip() for k in args.keys.split(",")]
+                if len(keys) != 4:
+                    raise CliError("--keys 需要 4 个键，顺序为 上,左,下,右", EXIT_USAGE)
+                keys = {d: parse_key(k)[0] for d, k in zip(JOY_DIRS, keys)}
+            pt = prof.new_joystick(x, y, r=args.size or 0.12, stick=stick, keys=keys)
+            if args.deadzone is not None:
+                pt["deadzone"] = args.deadzone
 
         def add(p):
             if pt["type"] == "look" and any(q["type"] == "look" for q in p["points"]):
@@ -533,7 +592,8 @@ def cmd_point(args, out):
                 _bind(p["points"], pt["key"], pt["mods"], pt, args.replace)
             else:
                 for k in pt["keys"].values():
-                    _bind(p["points"], k, [], pt, args.replace)
+                    if k:
+                        _bind(p["points"], k, [], pt, args.replace)
             return p["points"].index(pt)
 
         name, p, i = _edit(args, add)
@@ -583,6 +643,16 @@ def cmd_point(args, out):
                 q["keys"] = {d: parse_key(k)[0] for d, k in zip(JOY_DIRS, keys)}
                 for k in q["keys"].values():
                     _bind(p["points"], k, [], q, args.replace)
+            if args.stick is not None:
+                if q["type"] not in ("joystick", "look"):
+                    raise CliError("--stick 只适用于摇杆和视角区域", EXIT_USAGE)
+                q["stick"] = parse_stick(args.stick)
+            if args.deadzone is not None:
+                if q["type"] != "joystick":
+                    raise CliError("--deadzone 只适用于摇杆", EXIT_USAGE)
+                if not 0 <= args.deadzone < 0.9:
+                    raise CliError("--deadzone 应在 0..0.9 之间", EXIT_USAGE)
+                q["deadzone"] = args.deadzone
             return q
 
         name, p, q = _edit(args, change)
@@ -759,7 +829,7 @@ def check_profile(name, p, b):
         c = q.get("cancel") if q["type"] == "skill" else None
         if c and not (0 <= c[0] <= 1 and 0 <= c[1] <= 1):
             add("error", "out_of_range", f"第 {i} 个技能键的取消位置越界：({c[0]}, {c[1]})", point=i)
-        if q["type"] == "joystick" and not all(q["keys"].get(d) for d in JOY_DIRS):
+        if q["type"] == "joystick" and not q.get("stick") and not all(q["keys"].get(d) for d in JOY_DIRS):
             add("warning", "unbound", f"第 {i} 个摇杆有方向没有绑定按键", point=i)
     for i in range(len(pts)):
         for j in range(i + 1, len(pts)):
@@ -774,10 +844,17 @@ def check_profile(name, p, b):
                     f"第 {i} 和第 {j} 个按键点" + ("一个的中心落在另一个范围内" if kind == "inside" else "范围重叠"),
                     points=[i, j])
 
+    wants_pad = any(q.get("stick") for q in pts) or any(
+        gamepad.code(q.get("key")) is not None for q in pts if q["type"] in KEYED) or any(
+        gamepad.code(k) is not None for q in pts if q["type"] == "joystick"
+        for k in q["keys"].values() if k)
+    events = glob_events()
+    readable = [ev for ev in events if os.access(ev, os.R_OK)]
+    if wants_pad and readable and not _connected_pads():
+        add("warning", "no_gamepad", "配置里用到了手柄，但没有检测到手柄设备（插上后重新运行 check）")
     if not os.access("/dev/uinput", os.W_OK):
         add("error", "uinput_denied", "没有 /dev/uinput 写权限（安装包会带 udev 规则；或检查 uinput 模块）")
-    events = glob_events()
-    if events and not any(os.access(ev, os.R_OK) for ev in events):
+    if events and not readable:
         add("error", "input_denied", "读不了 /dev/input/event*：把用户加入 input 组后重新登录")
     notice = b.notice(p["output"], len(outs))
     if notice:
@@ -788,6 +865,27 @@ def check_profile(name, p, b):
 def glob_events():
     import glob
     return glob.glob("/dev/input/event*")
+
+
+def _connected_pads():
+    """Names of the gamepads the user can read; [] when there are none."""
+    import os
+    from evdev import InputDevice
+    from .engine import is_pad
+    found = []
+    for path in glob_events():
+        if not os.access(path, os.R_OK):
+            continue
+        try:
+            dev = InputDevice(path)
+        except OSError:
+            continue
+        try:
+            if is_pad(dev):
+                found.append(dev.name)
+        finally:
+            dev.close()
+    return found
 
 
 def cmd_check(args, out):
@@ -864,10 +962,15 @@ def build_parser():
     a.add_argument("--sens", type=float, help="灵敏度（默认 1.0）")
     a.add_argument("--cursor-key", help="显示鼠标的键（默认 lctrl）")
     a.add_argument("--cursor-mode", choices=["toggle", "hold"], help="toggle：单击切换（默认）；hold：按住显示")
+    a.add_argument("--stick", "--axis", dest="stick", metavar="left|right",
+                   help="让手柄摇杆也能转视角（默认不用）")
     a = add.add_parser("stick", help="摇杆：X Y", parents=[common, target])
     a.add_argument("x")
     a.add_argument("y")
-    a.add_argument("--keys", help="上,左,下,右（默认 w,a,s,d）")
+    a.add_argument("--keys", help="上,左,下,右（默认 w,a,s,d；用 --axis 时默认不绑按键）")
+    a.add_argument("--axis", "--stick", dest="stick", metavar="left|right",
+                   help="用哪个手柄摇杆（默认不用）")
+    a.add_argument("--deadzone", type=float, help="摇杆死区，0..1，默认 0.15")
     a.add_argument("--size", type=float, help="半径，占显示器高度的比例（默认 0.12）")
     a.add_argument("--replace", action="store_true", help="按键已被别的按键点使用时，改绑到这里")
     p = pt.add_parser("set", help="修改按键点", parents=[common, target])
@@ -881,6 +984,9 @@ def build_parser():
     p.add_argument("--cancel", help="技能键的取消位置 X,Y（none 清除）")
     p.add_argument("--cursor-key", help="视角：显示鼠标的键")
     p.add_argument("--cursor-mode", choices=["toggle", "hold"], help="视角：单击切换 / 按住显示")
+    p.add_argument("--stick", "--axis", dest="stick", metavar="left|right|none",
+                   help="摇杆/视角：跟着哪个手柄摇杆（none 取消）")
+    p.add_argument("--deadzone", type=float, help="摇杆：死区 0..0.9")
     p.add_argument("--replace", action="store_true", help="按键已被别的按键点使用时，改绑到这里")
     p = pt.add_parser("rm", help="删除按键点", parents=[common, target])
     p.add_argument("index", type=int, nargs="+")

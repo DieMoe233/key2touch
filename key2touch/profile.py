@@ -22,6 +22,11 @@ TAP_R = 0.025  # default tap size, fraction of output height
 
 JOY_DIRS = ("up", "left", "down", "right")
 
+# Gamepad sticks a point can follow; the engine resolves the name to the axes
+# each pad really has (ABS_X/Y, ABS_RX/RY, ...).
+STICK_NAMES = ("left", "right")
+STICK_DEADZONE = 0.15  # fraction of full deflection ignored around the centre
+
 DEFAULT_PROFILE = {
     "output": "",
     "only_focused": False,
@@ -59,10 +64,18 @@ def new_skill(x, y, key=None, r=SKILL_R):
     return {"type": "skill", "x": x, "y": y, "r": r, "sens": 1.0, "key": key, "mods": [], "cancel": None}
 
 
-def new_joystick(x, y, r=0.12):
+def new_joystick(x, y, r=0.12, stick=None, keys=None):
+    """Touch joystick: 4 direction keys and/or a gamepad stick.
+
+    keys and stick add up, so a D-pad (as BTN_DPAD_*) and the left stick can
+    drive the same touch stick; a new point uses WASD unless a stick is asked
+    for, in which case it starts with no keys."""
+    if keys is None:
+        keys = ({"up": None, "left": None, "down": None, "right": None} if stick
+                else {"up": "KEY_W", "left": "KEY_A", "down": "KEY_S", "right": "KEY_D"})
     return {
-        "type": "joystick", "x": x, "y": y, "r": r,
-        "keys": {"up": "KEY_W", "left": "KEY_A", "down": "KEY_S", "right": "KEY_D"},
+        "type": "joystick", "x": x, "y": y, "r": r, "keys": keys,
+        "stick": stick, "deadzone": STICK_DEADZONE,
     }
 
 
@@ -70,16 +83,17 @@ def new_joystick(x, y, r=0.12):
 LOOK_MIN_R = 0.15
 
 
-def new_look(x, y, r=0.22):
+def new_look(x, y, r=0.22, stick=None):
     """Camera area: mouse motion drags a virtual finger around (x, y).
 
     r: how far the finger may wander (fraction of output height) before it
     is lifted and put back at the centre; sens: touch distance per mouse
     count (1.0 = 0.0005 of the output height); cursor_key: brings the mouse
     cursor back — tapped on its own to toggle (cursor_mode "toggle"), or
-    held (cursor_mode "hold")."""
+    held (cursor_mode "hold"); stick: a gamepad stick that turns the camera
+    as well ("left"/"right", or None for the mouse only)."""
     return {"type": "look", "x": x, "y": y, "r": r, "sens": 1.0,
-            "cursor_key": "KEY_LEFTCTRL", "cursor_mode": "toggle"}
+            "cursor_key": "KEY_LEFTCTRL", "cursor_mode": "toggle", "stick": stick}
 
 
 def normalize(p):
